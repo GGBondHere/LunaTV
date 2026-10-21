@@ -8,6 +8,7 @@ import { getAuthInfoFromCookie } from '@/lib/auth';
 import { configSelfCheck, setCachedConfig } from '@/lib/config';
 import { SimpleCrypto } from '@/lib/crypto';
 import { db } from '@/lib/db';
+import { parsePublicFavoritesBackup } from '@/lib/public-favorites';
 
 export const runtime = 'nodejs';
 
@@ -77,6 +78,17 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: '备份文件格式无效' }, { status: 400 });
     }
 
+    // 在任何清空操作前验证公共数据；旧备份没有此字段时恢复为空列表。
+    let publicFavorites;
+    try {
+      publicFavorites = parsePublicFavoritesBackup(importData.data.publicFavorites);
+    } catch (error) {
+      return NextResponse.json(
+        { error: error instanceof Error ? error.message : '公共收藏格式无效' },
+        { status: 400 }
+      );
+    }
+
     // 开始导入数据 - 先清空现有数据
     await db.clearAllData();
 
@@ -125,6 +137,10 @@ export async function POST(req: NextRequest) {
           }
         }
       }
+    }
+
+    for (const [key, favorite] of Object.entries(publicFavorites)) {
+      await db.addPublicFavorite(key, favorite);
     }
 
     return NextResponse.json({

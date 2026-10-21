@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any,react-hooks/exhaustive-deps,@typescript-eslint/no-empty-function */
 
-import { ExternalLink, Heart, Link, PlayCircleIcon, Radio, Trash2 } from 'lucide-react';
+import { ExternalLink, Heart, Link, PlayCircleIcon, Radio, Trash2, Users } from 'lucide-react';
 import Image from 'next/image';
 import { useRouter } from 'next/navigation';
 import React, {
@@ -21,11 +21,15 @@ import {
   saveFavorite,
   subscribeToDataUpdates,
 } from '@/lib/db.client';
+import { refreshPublicFavorites, togglePublicFavorite } from '@/lib/public-favorites.client';
+import type { PublicFavoriteInput, SearchResult } from '@/lib/types';
 import { processImageUrl } from '@/lib/utils';
 import { useLongPress } from '@/hooks/useLongPress';
+import { usePublicFavorites } from '@/hooks/usePublicFavorites';
 
 import { ImagePlaceholder } from '@/components/ImagePlaceholder';
 import MobileActionSheet from '@/components/MobileActionSheet';
+import PublicFavoriteButton from '@/components/PublicFavoriteButton';
 
 export interface VideoCardProps {
   id?: string;
@@ -38,7 +42,7 @@ export interface VideoCardProps {
   source_names?: string[];
   progress?: number;
   year?: string;
-  from: 'playrecord' | 'favorite' | 'search' | 'douban';
+  from: 'playrecord' | 'favorite' | 'public' | 'search' | 'douban';
   currentEpisode?: number;
   douban_id?: number;
   onDelete?: () => void;
@@ -46,6 +50,7 @@ export interface VideoCardProps {
   type?: string;
   isBangumi?: boolean;
   isAggregate?: boolean;
+  favoriteTarget?: SearchResult;
   origin?: 'vod' | 'live';
 }
 
@@ -75,6 +80,7 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
     type = '',
     isBangumi = false,
     isAggregate = false,
+    favoriteTarget,
     origin = 'vod',
   }: VideoCardProps,
   ref
@@ -122,6 +128,21 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
   const actualEpisodes = dynamicEpisodes;
   const actualYear = year;
   const actualQuery = query || '';
+  // 聚合卡片用第一条单源结果收藏，播放仍沿用原有的聚合选源逻辑。
+  const favoriteSource = actualSource || favoriteTarget?.source;
+  const favoriteId = actualId || favoriteTarget?.id;
+  const publicEligible = from !== 'douban' && origin === 'vod' && !!favoriteSource && !!favoriteId;
+  const publicState = usePublicFavorites(publicEligible);
+  const publicKey = generateStorageKey(favoriteSource || '', favoriteId || '');
+  const publicFavorite = publicState.favorites[publicKey];
+  const publicMetadata = useMemo<PublicFavoriteInput>(() => ({
+    title: favoriteTarget?.title ?? actualTitle,
+    source_name: favoriteTarget?.source_name ?? source_name ?? '',
+    year: favoriteTarget?.year ?? actualYear ?? '',
+    cover: favoriteTarget?.poster ?? actualPoster,
+    total_episodes: favoriteTarget?.episodes.length || actualEpisodes || 1,
+    search_title: actualQuery,
+  }), [favoriteTarget, actualTitle, source_name, actualYear, actualPoster, actualEpisodes, actualQuery]);
   const actualSearchType = isAggregate
     ? (actualEpisodes && actualEpisodes === 1 ? 'movie' : 'tv')
     : type;
@@ -159,7 +180,7 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
     async (e: React.MouseEvent) => {
       e.preventDefault();
       e.stopPropagation();
-      if (from === 'douban' || !actualSource || !actualId) return;
+      if (from === 'douban' || !favoriteSource || !favoriteId) return;
 
       try {
         // 确定当前收藏状态
@@ -167,7 +188,7 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
 
         if (currentFavorited) {
           // 如果已收藏，删除收藏
-          await deleteFavorite(actualSource, actualId);
+          await deleteFavorite(favoriteSource, favoriteId);
           if (from === 'search') {
             setSearchFavorited(false);
           } else {
@@ -175,12 +196,8 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
           }
         } else {
           // 如果未收藏，添加收藏
-          await saveFavorite(actualSource, actualId, {
-            title: actualTitle,
-            source_name: source_name || '',
-            year: actualYear || '',
-            cover: actualPoster,
-            total_episodes: actualEpisodes ?? 1,
+          await saveFavorite(favoriteSource, favoriteId, {
+            ...publicMetadata,
             save_time: Date.now(),
           });
           if (from === 'search') {
@@ -195,13 +212,9 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
     },
     [
       from,
-      actualSource,
-      actualId,
-      actualTitle,
-      source_name,
-      actualYear,
-      actualPoster,
-      actualEpisodes,
+      favoriteSource,
+      favoriteId,
+      publicMetadata,
       favorited,
       searchFavorited,
     ]
@@ -283,15 +296,15 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
 
   // 检查搜索结果的收藏状态
   const checkSearchFavoriteStatus = useCallback(async () => {
-    if (from === 'search' && !isAggregate && actualSource && actualId && searchFavorited === null) {
+    if (from === 'search' && favoriteSource && favoriteId && searchFavorited === null) {
       try {
-        const fav = await isFavorited(actualSource, actualId);
+        const fav = await isFavorited(favoriteSource, favoriteId);
         setSearchFavorited(fav);
       } catch (err) {
         setSearchFavorited(false);
       }
     }
-  }, [from, isAggregate, actualSource, actualId, searchFavorited]);
+  }, [from, favoriteSource, favoriteId, searchFavorited]);
 
   // 长按操作
   const handleLongPress = useCallback(() => {
@@ -299,12 +312,14 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
       // 立即显示菜单，避免等待数据加载导致动画卡顿
       setShowMobileActions(true);
 
+      if (publicEligible) void refreshPublicFavorites();
+
       // 异步检查收藏状态，不阻塞菜单显示
-      if (from === 'search' && !isAggregate && actualSource && actualId && searchFavorited === null) {
+      if (from === 'search' && favoriteSource && favoriteId && searchFavorited === null) {
         checkSearchFavoriteStatus();
       }
     }
-  }, [showMobileActions, from, isAggregate, actualSource, actualId, searchFavorited, checkSearchFavoriteStatus]);
+  }, [showMobileActions, from, favoriteSource, favoriteId, searchFavorited, checkSearchFavoriteStatus, publicEligible]);
 
   // 长按手势hook
   const longPressProps = useLongPress({
@@ -326,6 +341,16 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
         showYear: false,
       },
       favorite: {
+        showSourceName: true,
+        showProgress: false,
+        showPlayButton: true,
+        showHeart: true,
+        showCheckCircle: false,
+        showDoubanLink: false,
+        showRating: false,
+        showYear: false,
+      },
+      public: {
         showSourceName: true,
         showProgress: false,
         showPlayButton: true,
@@ -386,7 +411,7 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
     // 聚合源信息 - 直接在菜单中展示，不需要单独的操作项
 
     // 收藏/取消收藏操作
-    if (config.showHeart && from !== 'douban' && actualSource && actualId) {
+    if (config.showHeart && from !== 'douban' && favoriteSource && favoriteId) {
       const currentFavorited = from === 'search' ? searchFavorited : favorited;
 
       if (from === 'search') {
@@ -442,6 +467,19 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
       }
     }
 
+    if (publicEligible && publicState.enabled) {
+      actions.push({
+        id: 'public-favorite',
+        label: publicState.error ? '重试加载公共收藏'
+          : !publicState.loaded ? '公共收藏加载中...'
+          : publicFavorite ? publicFavorite.canDelete ? '移出公共收藏' : '已加入公共收藏' : '加入公共收藏',
+        icon: <Users size={20} className={publicFavorite ? 'text-blue-500' : ''} />,
+        disabled: publicState.pendingKeys.has(publicKey) || (!publicState.loaded && !publicState.error) || (!!publicFavorite && !publicFavorite.canDelete && !publicState.error),
+        onClick: () => publicState.error ? refreshPublicFavorites() : togglePublicFavorite(publicKey, publicMetadata),
+        color: 'default' as const,
+      });
+    }
+
     // 删除播放记录操作
     if (config.showCheckCircle && from === 'playrecord' && actualSource && actualId) {
       actions.push({
@@ -481,6 +519,8 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
     from,
     actualSource,
     actualId,
+    favoriteSource,
+    favoriteId,
     favorited,
     searchFavorited,
     actualDoubanId,
@@ -490,6 +530,11 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
     handleClick,
     handleToggleFavorite,
     handleDeleteRecord,
+    publicEligible,
+    publicState,
+    publicFavorite,
+    publicKey,
+    publicMetadata,
   ]);
 
   return (
@@ -516,8 +561,10 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
           // 右键弹出操作菜单
           setShowMobileActions(true);
 
+          if (publicEligible) void refreshPublicFavorites();
+
           // 异步检查收藏状态，不阻塞菜单显示
-          if (from === 'search' && !isAggregate && actualSource && actualId && searchFavorited === null) {
+          if (from === 'search' && favoriteSource && favoriteId && searchFavorited === null) {
             checkSearchFavoriteStatus();
           }
 
@@ -676,6 +723,9 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
                     return false;
                   }}
                 />
+              )}
+              {publicEligible && from !== 'search' && actualSource && actualId && (
+                <PublicFavoriteButton compact source={actualSource} id={actualId} favorite={publicMetadata} />
               )}
             </div>
           )}

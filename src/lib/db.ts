@@ -3,7 +3,7 @@
 import { AdminConfig } from './admin.types';
 import { KvrocksStorage } from './kvrocks.db';
 import { RedisStorage } from './redis.db';
-import { Favorite, IStorage, PlayRecord, SkipConfig } from './types';
+import { Favorite, IStorage, PlayRecord, PublicFavorite, PublicFavoriteDeleteResult, SkipConfig } from './types';
 import { UpstashRedisStorage } from './upstash.db';
 
 // storage type 常量: 'localstorage' | 'redis' | 'upstash'，默认 'localstorage'
@@ -160,6 +160,24 @@ export class DbManager {
   ): Promise<boolean> {
     const favorite = await this.getFavorite(userName, source, id);
     return favorite !== null;
+  }
+
+  // ---------- 公共收藏 ----------
+  async getAllPublicFavorites(): Promise<Record<string, PublicFavorite>> {
+    await this.ensureMigrated();
+    return this.storage.getAllPublicFavorites();
+  }
+
+  async addPublicFavorite(key: string, favorite: PublicFavorite): Promise<boolean> {
+    return this.storage.addPublicFavorite(key, favorite);
+  }
+
+  async deletePublicFavorite(
+    key: string,
+    username: string,
+    isAdmin: boolean
+  ): Promise<PublicFavoriteDeleteResult> {
+    return this.storage.deletePublicFavorite(key, username, isAdmin);
   }
 
   // ---------- 用户相关 ----------

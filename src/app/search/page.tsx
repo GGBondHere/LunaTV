@@ -781,9 +781,11 @@ function SearchPageClient() {
                         return (
                           <div key={`agg-${mapKey}`} className='w-full'>
                             <VideoCard
+                              key={`${group[0]?.source}+${group[0]?.id}`}
                               ref={getGroupRef(mapKey)}
                               from='search'
                               isAggregate={true}
+                              favoriteTarget={group[0]}
                               title={title}
                               poster={poster}
                               year={year}

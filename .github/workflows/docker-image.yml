@@ -9,46 +9,60 @@ on:
         default: 'latest'
         type: string
   push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
+    branches: [main]
   release:
-    types: [ published ]
+    types: [published]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: docker-${{ github.event.release.tag_name || inputs.tag || 'latest' }}
   cancel-in-progress: true
 
 permissions:
-  contents: write
+  contents: read
   packages: write
-  actions: write
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.image.outputs.image }}
+      tag: ${{ steps.image.outputs.tag }}
+    steps:
+      - name: Determine image and validate tag
+        id: image
+        env:
+          REPOSITORY: ${{ github.repository }}
+          EVENT_NAME: ${{ github.event_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          image="ghcr.io/${REPOSITORY,,}"
+          tag=latest
+          if [ "$EVENT_NAME" = release ]; then
+            tag="$RELEASE_TAG"
+          elif [ "$EVENT_NAME" = workflow_dispatch ]; then
+            tag="${INPUT_TAG:-latest}"
+          fi
+          if [[ ! "$tag" =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$ ]]; then
+            echo 'Invalid Docker tag' >&2
+            exit 1
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: prepare
     strategy:
       matrix:
         include:
           - platform: linux/amd64
+            name: linux-amd64
             os: ubuntu-latest
           - platform: linux/arm64
+            name: linux-arm64
             os: ubuntu-24.04-arm
     runs-on: ${{ matrix.os }}
-
     steps:
-      - name: Prepare platform name
-        run: |
-          echo "PLATFORM_NAME=${{ matrix.platform }}" | sed 's|/|-|g' >> $GITHUB_ENV
-
-      - name: Determine Docker tag
-        id: docker-tag
-        run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${{ github.event.inputs.tag || 'latest' }}" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Checkout source code
         uses: actions/checkout@v4
 
@@ -62,20 +76,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set lowercase repository owner
-        id: lowercase
-        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
-
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v5
-
         with:
-          images: ghcr.io/moontechlab/lunatv
-          tags: |
-            type=raw,value=${{ github.event.inputs.tag || 'latest' }},enable={{is_default_branch}}
-            type=semver,pattern={{version}},enable=${{ github.event_name == 'release' }}
-            type=semver,pattern={{major}}.{{minor}},enable=${{ github.event_name == 'release' }}
+          images: ${{ needs.prepare.outputs.image }}
+          tags: type=raw,value=${{ needs.prepare.outputs.tag }}
 
       - name: Build and push by digest
         id: build
@@ -85,27 +91,30 @@ jobs:
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          tags: ghcr.io/moontechlab/lunatv:${{ steps.docker-tag.outputs.tag }}
-          outputs: type=image,name=ghcr.io/moontechlab/lunatv,name-canonical=true,push=true
+          outputs: type=image,name=${{ needs.prepare.outputs.image }},push-by-digest=true,name-canonical=true,push=true
 
       - name: Export digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
         run: |
+          if [[ ! "$DIGEST" =~ ^sha256:[a-f0-9]{64}$ ]]; then
+            echo 'Invalid image digest' >&2
+            exit 1
+          fi
           mkdir -p /tmp/digests
-          digest="${{ steps.build.outputs.digest }}"
-          touch "/tmp/digests/${digest#sha256:}"
+          touch "/tmp/digests/${DIGEST#sha256:}"
 
       - name: Upload digest
         uses: actions/upload-artifact@v4
         with:
-          name: digests-${{ env.PLATFORM_NAME }}
+          name: digests-${{ matrix.name }}
           path: /tmp/digests/*
           if-no-files-found: error
           retention-days: 1
 
   merge:
     runs-on: ubuntu-latest
-    needs:
-      - build
+    needs: [prepare, build]
     steps:
       - name: Download digests
         uses: actions/download-artifact@v4
@@ -124,35 +133,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set lowercase repository owner
-        id: lowercase
-        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
-
-      - name: Determine Docker tag
-        id: docker-tag
-        run: |
-          if [ "${{ github.event_name }}" = "release" ]; then
-            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=${{ github.event.inputs.tag || 'latest' }}" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Create manifest list and push
         working-directory: /tmp/digests
+        env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
+          TAG: ${{ needs.prepare.outputs.tag }}
         run: |
-          docker buildx imagetools create -t ghcr.io/moontechlab/lunatv:${{ steps.docker-tag.outputs.tag }} \
-            $(printf 'ghcr.io/moontechlab/lunatv@sha256:%s ' *)
-
-  cleanup-refresh:
-    runs-on: ubuntu-latest
-    needs:
-      - merge
-    if: always()
-    steps:
-      - name: Delete workflow runs
-        uses: Mattraks/delete-workflow-runs@main
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          retain_days: 0
-          keep_minimum_runs: 2
+          shopt -s nullglob
+          digests=(*)
+          if [ "${#digests[@]}" -ne 2 ]; then
+            echo 'Expected both platform digests' >&2
+            exit 1
+          fi
+          sources=()
+          for digest in "${digests[@]}"; do
+            if [[ ! "$digest" =~ ^[a-f0-9]{64}$ ]]; then
+              echo 'Invalid image digest artifact' >&2
+              exit 1
+            fi
+            sources+=("$IMAGE@sha256:$digest")
+          done
+          docker buildx imagetools create -t "$IMAGE:$TAG" "${sources[@]}"

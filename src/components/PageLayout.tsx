@@ -1,3 +1,7 @@
+'use client';
+
+import { usePublicFavoritesPageRefresh } from '@/hooks/usePublicFavorites';
+
 import { BackButton } from './BackButton';
 import MobileBottomNav from './MobileBottomNav';
 import MobileHeader from './MobileHeader';
@@ -11,6 +15,7 @@ interface PageLayoutProps {
 }
 
 const PageLayout = ({ children, activePath = '/' }: PageLayoutProps) => {
+  usePublicFavoritesPageRefresh();
   return (
     <div className='w-full min-h-screen'>
       {/* 移动端头部 */}

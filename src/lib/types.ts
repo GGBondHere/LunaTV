@@ -26,6 +26,21 @@ export interface Favorite {
   origin?: 'vod' | 'live';
 }
 
+export type PublicFavoriteInput = Omit<Favorite, 'save_time' | 'origin'>;
+
+// 添加者仅保存在服务端，不能直接作为 API 响应返回。
+export interface PublicFavorite extends PublicFavoriteInput {
+  save_time: number;
+  addedBy: string;
+}
+
+export interface PublicFavoriteView extends PublicFavoriteInput {
+  save_time: number;
+  canDelete: boolean;
+}
+
+export type PublicFavoriteDeleteResult = 'deleted' | 'missing' | 'forbidden';
+
 // 存储接口
 export interface IStorage {
   // 播放记录相关
@@ -45,6 +60,16 @@ export interface IStorage {
   getAllFavorites(userName: string): Promise<{ [key: string]: Favorite }>;
   deleteFavorite(userName: string, key: string): Promise<void>;
   deleteAllFavorites(userName: string): Promise<void>;
+
+  // 公共收藏与用户数据独立，删除用户时不清理。
+  getAllPublicFavorites(): Promise<Record<string, PublicFavorite>>;
+  addPublicFavorite(key: string, favorite: PublicFavorite): Promise<boolean>;
+  deletePublicFavorite(
+    key: string,
+    username: string,
+    isAdmin: boolean
+  ): Promise<PublicFavoriteDeleteResult>;
+  clearPublicFavorites(): Promise<void>;
 
   // 用户相关
   registerUser(userName: string, password: string): Promise<void>;

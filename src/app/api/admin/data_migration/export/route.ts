@@ -53,6 +53,7 @@ export async function POST(req: NextRequest) {
       data: {
         // 管理员配置
         adminConfig: config,
+        publicFavorites: await db.getAllPublicFavorites(),
         // 所有用户数据
         userData: {} as { [username: string]: any }
       }

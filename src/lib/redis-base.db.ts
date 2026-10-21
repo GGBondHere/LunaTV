@@ -4,7 +4,8 @@ import { createClient, RedisClientType } from 'redis';
 
 import { AdminConfig } from './admin.types';
 import { hashPassword, isHashed, verifyPassword } from './password';
-import { Favorite, IStorage, PlayRecord, SkipConfig } from './types';
+import { DELETE_PUBLIC_FAVORITE_SCRIPT, PUBLIC_FAVORITES_KEY } from './public-favorites';
+import { Favorite, IStorage, PlayRecord, PublicFavorite, PublicFavoriteDeleteResult, SkipConfig } from './types';
 
 // 搜索历史最大条数
 const SEARCH_HISTORY_LIMIT = 20;
@@ -244,6 +245,36 @@ export abstract class BaseRedisStorage implements IStorage {
 
   async deleteAllFavorites(userName: string): Promise<void> {
     await this.withRetry(() => this.client.del(this.favHashKey(userName)));
+  }
+
+  // ---------- 公共收藏 ----------
+  async getAllPublicFavorites(): Promise<Record<string, PublicFavorite>> {
+    const all = await this.withRetry(() => this.client.hGetAll(PUBLIC_FAVORITES_KEY));
+    return Object.fromEntries(
+      Object.entries(all).map(([key, raw]) => [key, JSON.parse(raw) as PublicFavorite])
+    );
+  }
+
+  async addPublicFavorite(key: string, favorite: PublicFavorite): Promise<boolean> {
+    return this.withRetry(() =>
+      this.client.hSetNX(PUBLIC_FAVORITES_KEY, key, JSON.stringify(favorite))
+    );
+  }
+
+  async deletePublicFavorite(
+    key: string,
+    username: string,
+    isAdmin: boolean
+  ): Promise<PublicFavoriteDeleteResult> {
+    const result = await this.withRetry(() => this.client.eval(DELETE_PUBLIC_FAVORITE_SCRIPT, {
+      keys: [PUBLIC_FAVORITES_KEY],
+      arguments: [key, username, isAdmin ? '1' : '0'],
+    }));
+    return Number(result) === -1 ? 'forbidden' : Number(result) === 0 ? 'missing' : 'deleted';
+  }
+
+  async clearPublicFavorites(): Promise<void> {
+    await this.withRetry(() => this.client.del(PUBLIC_FAVORITES_KEY));
   }
 
   // ---------- 用户注册 / 登录 ----------
@@ -587,6 +618,7 @@ export abstract class BaseRedisStorage implements IStorage {
       }
 
       // 删除管理员配置
+      await this.clearPublicFavorites();
       await this.withRetry(() => this.client.del(this.adminConfigKey()));
 
       console.log('所有数据已清空');

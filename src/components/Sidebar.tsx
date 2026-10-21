@@ -2,7 +2,7 @@
 
 'use client';
 
-import { Cat, Clover, Film, Home, Menu, Radio, Search, Star, Tv } from 'lucide-react';
+import { Cat, Clover, Film, Home, Menu, Radio, Search, Star, Tv, Users } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import {
@@ -13,6 +13,8 @@ import {
   useLayoutEffect,
   useState,
 } from 'react';
+
+import { usePublicFavoritesEnabled } from '@/hooks/usePublicFavorites';
 
 import { useSite } from './SiteProvider';
 
@@ -54,6 +56,7 @@ declare global {
 }
 
 const Sidebar = ({ onToggle, activePath = '/' }: SidebarProps) => {
+  const publicFavoritesEnabled = usePublicFavoritesEnabled();
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -177,6 +180,14 @@ const Sidebar = ({ onToggle, activePath = '/' }: SidebarProps) => {
     }
   }, []);
 
+  const navigationItems = [
+    { icon: Home, label: '首页', href: '/' },
+    { icon: Search, label: '搜索', href: '/search' },
+    ...(publicFavoritesEnabled
+      ? [{ icon: Users, label: '公共收藏', href: '/shared' }]
+      : []),
+  ];
+
   return (
     <SidebarContext.Provider value={contextValue}>
       {/* 在移动端隐藏侧边栏 */}
@@ -210,48 +221,40 @@ const Sidebar = ({ onToggle, activePath = '/' }: SidebarProps) => {
               </button>
             </div>
 
-            {/* 首页和搜索导航 */}
+            {/* 功能导航 */}
             <nav className='px-2 mt-4 space-y-1'>
-              <Link
-                href='/'
-                onClick={() => setActive('/')}
-                data-active={active === '/'}
-                className={`group flex items-center rounded-lg px-2 py-2 pl-4 text-gray-700 hover:bg-gray-100/30 hover:text-green-600 data-[active=true]:bg-green-500/20 data-[active=true]:text-green-700 font-medium transition-colors duration-200 min-h-[40px] dark:text-gray-300 dark:hover:text-green-400 dark:data-[active=true]:bg-green-500/10 dark:data-[active=true]:text-green-400 ${isCollapsed ? 'w-full max-w-none mx-0' : 'mx-0'
-                  } gap-3 justify-start`}
-              >
-                <div className='w-4 h-4 flex items-center justify-center'>
-                  <Home className='h-4 w-4 text-gray-500 group-hover:text-green-600 data-[active=true]:text-green-700 dark:text-gray-400 dark:group-hover:text-green-400 dark:data-[active=true]:text-green-400' />
-                </div>
-                {!isCollapsed && (
-                  <span className='whitespace-nowrap transition-opacity duration-200 opacity-100'>
-                    首页
-                  </span>
-                )}
-              </Link>
-              <Link
-                href='/search'
-                onClick={(e) => {
-                  e.preventDefault();
-                  handleSearchClick();
-                  setActive('/search');
-                }}
-                data-active={active === '/search'}
-                className={`group flex items-center rounded-lg px-2 py-2 pl-4 text-gray-700 hover:bg-gray-100/30 hover:text-green-600 data-[active=true]:bg-green-500/20 data-[active=true]:text-green-700 font-medium transition-colors duration-200 min-h-[40px] dark:text-gray-300 dark:hover:text-green-400 dark:data-[active=true]:bg-green-500/10 dark:data-[active=true]:text-green-400 ${isCollapsed ? 'w-full max-w-none mx-0' : 'mx-0'
-                  } gap-3 justify-start`}
-              >
-                <div className='w-4 h-4 flex items-center justify-center'>
-                  <Search className='h-4 w-4 text-gray-500 group-hover:text-green-600 data-[active=true]:text-green-700 dark:text-gray-400 dark:group-hover:text-green-400 dark:data-[active=true]:text-green-400' />
-                </div>
-                {!isCollapsed && (
-                  <span className='whitespace-nowrap transition-opacity duration-200 opacity-100'>
-                    搜索
-                  </span>
-                )}
-              </Link>
+              {navigationItems.map((item) => {
+                const Icon = item.icon;
+                return (
+                  <Link
+                    key={item.href}
+                    href={item.href}
+                    onClick={(e) => {
+                      if (item.href === '/search') {
+                        e.preventDefault();
+                        handleSearchClick();
+                      }
+                      setActive(item.href);
+                    }}
+                    data-active={active === item.href}
+                    className={`group flex items-center rounded-lg px-2 py-2 pl-4 text-gray-700 hover:bg-gray-100/30 hover:text-green-600 data-[active=true]:bg-green-500/20 data-[active=true]:text-green-700 font-medium transition-colors duration-200 min-h-[40px] dark:text-gray-300 dark:hover:text-green-400 dark:data-[active=true]:bg-green-500/10 dark:data-[active=true]:text-green-400 ${isCollapsed ? 'w-full max-w-none mx-0' : 'mx-0'
+                      } gap-3 justify-start`}
+                  >
+                    <div className='w-4 h-4 flex items-center justify-center'>
+                      <Icon className='h-4 w-4 text-gray-500 group-hover:text-green-600 data-[active=true]:text-green-700 dark:text-gray-400 dark:group-hover:text-green-400 dark:data-[active=true]:text-green-400' />
+                    </div>
+                    {!isCollapsed && (
+                      <span className='whitespace-nowrap transition-opacity duration-200 opacity-100'>
+                        {item.label}
+                      </span>
+                    )}
+                  </Link>
+                );
+              })}
             </nav>
 
             {/* 菜单项 */}
-            <div className='flex-1 overflow-y-auto px-2 pt-4'>
+            <div className='flex-1 overflow-y-auto px-2 pt-1'>
               <div className='space-y-1'>
                 {menuItems.map((item) => {
                   // 检查当前路径是否匹配这个菜单项

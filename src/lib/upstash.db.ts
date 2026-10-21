@@ -4,7 +4,8 @@ import { Redis } from '@upstash/redis';
 
 import { AdminConfig } from './admin.types';
 import { hashPassword, isHashed, verifyPassword } from './password';
-import { Favorite, IStorage, PlayRecord, SkipConfig } from './types';
+import { DELETE_PUBLIC_FAVORITE_SCRIPT, PUBLIC_FAVORITES_KEY } from './public-favorites';
+import { Favorite, IStorage, PlayRecord, PublicFavorite, PublicFavoriteDeleteResult, SkipConfig } from './types';
 
 // 搜索历史最大条数
 const SEARCH_HISTORY_LIMIT = 20;
@@ -152,6 +153,34 @@ export class UpstashRedisStorage implements IStorage {
 
   async deleteAllFavorites(userName: string): Promise<void> {
     await withRetry(() => this.client.del(this.favHashKey(userName)));
+  }
+
+  // ---------- 公共收藏 ----------
+  async getAllPublicFavorites(): Promise<Record<string, PublicFavorite>> {
+    return (await withRetry(() =>
+      this.client.hgetall<Record<string, PublicFavorite>>(PUBLIC_FAVORITES_KEY)
+    )) || {};
+  }
+
+  async addPublicFavorite(key: string, favorite: PublicFavorite): Promise<boolean> {
+    return (await withRetry(() => this.client.hsetnx(PUBLIC_FAVORITES_KEY, key, favorite))) === 1;
+  }
+
+  async deletePublicFavorite(
+    key: string,
+    username: string,
+    isAdmin: boolean
+  ): Promise<PublicFavoriteDeleteResult> {
+    const result = await withRetry(() => this.client.eval<string[], number>(
+      DELETE_PUBLIC_FAVORITE_SCRIPT,
+      [PUBLIC_FAVORITES_KEY],
+      [key, username, isAdmin ? '1' : '0']
+    ));
+    return result === -1 ? 'forbidden' : result === 0 ? 'missing' : 'deleted';
+  }
+
+  async clearPublicFavorites(): Promise<void> {
+    await withRetry(() => this.client.del(PUBLIC_FAVORITES_KEY));
   }
 
   // ---------- 用户注册 / 登录 ----------
@@ -492,6 +521,7 @@ export class UpstashRedisStorage implements IStorage {
       }
 
       // 删除管理员配置
+      await this.clearPublicFavorites();
       await withRetry(() => this.client.del(this.adminConfigKey()));
 
       console.log('所有数据已清空');

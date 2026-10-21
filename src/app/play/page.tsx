@@ -26,6 +26,7 @@ import { getVideoResolutionFromM3u8, processImageUrl } from '@/lib/utils';
 
 import EpisodeSelector from '@/components/EpisodeSelector';
 import PageLayout from '@/components/PageLayout';
+import PublicFavoriteButton from '@/components/PublicFavoriteButton';
 
 // 扩展 HTMLVideoElement 类型以支持 hls 属性
 declare global {
@@ -1978,6 +1979,23 @@ function PlayPageClient() {
                 >
                   <FavoriteIcon filled={favorited} />
                 </button>
+                {currentSource && currentId && detail && (
+                  <span className='ml-3 flex'>
+                    <PublicFavoriteButton
+                      source={currentSource}
+                      id={currentId}
+                      disabled={loading || detail.source !== currentSource || detail.id !== currentId}
+                      favorite={{
+                        title: videoTitle,
+                        source_name: detail.source_name || '',
+                        year: detail.year || videoYear || '',
+                        cover: detail.poster || videoCover,
+                        total_episodes: detail.episodes.length || 1,
+                        search_title: searchTitle,
+                      }}
+                    />
+                  </span>
+                )}
               </h1>
 
               {/* 关键信息行 */}
