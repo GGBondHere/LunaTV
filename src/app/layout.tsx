@@ -9,6 +9,7 @@ import { getConfig } from '@/lib/config';
 
 import { GlobalErrorIndicator } from '../components/GlobalErrorIndicator';
 import { SiteProvider } from '../components/SiteProvider';
+import SocialProvider from '../components/SocialProvider';
 import { ThemeProvider } from '../components/ThemeProvider';
 
 const inter = Inter({ subsets: ['latin'] });
@@ -124,7 +125,7 @@ export default async function RootLayout({
           disableTransitionOnChange
         >
           <SiteProvider siteName={siteName} announcement={announcement}>
-            {children}
+            <SocialProvider>{children}</SocialProvider>
             <GlobalErrorIndicator />
           </SiteProvider>
         </ThemeProvider>

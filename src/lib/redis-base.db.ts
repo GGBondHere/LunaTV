@@ -5,6 +5,7 @@ import { createClient, RedisClientType } from 'redis';
 import { AdminConfig } from './admin.types';
 import { hashPassword, isHashed, verifyPassword } from './password';
 import { DELETE_PUBLIC_FAVORITE_SCRIPT, PUBLIC_FAVORITES_KEY } from './public-favorites';
+import { SOCIAL_KEYS, SOCIAL_SCRIPT, SocialCommand } from './social';
 import { Favorite, IStorage, PlayRecord, PublicFavorite, PublicFavoriteDeleteResult, SkipConfig } from './types';
 
 // 搜索历史最大条数
@@ -144,6 +145,13 @@ export function createRedisClient(config: RedisConnectionConfig, globalSymbol: s
 
 // 抽象基类，包含所有通用的Redis操作逻辑
 export abstract class BaseRedisStorage implements IStorage {
+  async socialCommand<T>(command: SocialCommand, payload: object): Promise<T> {
+    const result = await this.withRetry(() => this.client.eval(SOCIAL_SCRIPT, {
+      keys: SOCIAL_KEYS,
+      arguments: [command, JSON.stringify(payload)],
+    }));
+    return JSON.parse(String(result)) as T;
+  }
   protected client: RedisClientType;
   protected withRetry: <T>(operation: () => Promise<T>, maxRetries?: number) => Promise<T>;
 
@@ -323,6 +331,7 @@ export abstract class BaseRedisStorage implements IStorage {
 
   // 删除用户及其所有数据
   async deleteUser(userName: string): Promise<void> {
+    await this.socialCommand('delete-user', { user: userName });
     // 删除用户密码
     await this.withRetry(() => this.client.del(this.userPwdKey(userName)));
 
@@ -619,6 +628,7 @@ export abstract class BaseRedisStorage implements IStorage {
 
       // 删除管理员配置
       await this.clearPublicFavorites();
+      await this.socialCommand('clear', {});
       await this.withRetry(() => this.client.del(this.adminConfigKey()));
 
       console.log('所有数据已清空');

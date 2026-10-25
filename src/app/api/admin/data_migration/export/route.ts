@@ -54,6 +54,7 @@ export async function POST(req: NextRequest) {
         // 管理员配置
         adminConfig: config,
         publicFavorites: await db.getAllPublicFavorites(),
+        chat: await db.socialCommand('export', {}),
         // 所有用户数据
         userData: {} as { [username: string]: any }
       }

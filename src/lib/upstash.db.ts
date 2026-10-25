@@ -5,6 +5,7 @@ import { Redis } from '@upstash/redis';
 import { AdminConfig } from './admin.types';
 import { hashPassword, isHashed, verifyPassword } from './password';
 import { DELETE_PUBLIC_FAVORITE_SCRIPT, PUBLIC_FAVORITES_KEY } from './public-favorites';
+import { SOCIAL_KEYS, SOCIAL_SCRIPT, SocialCommand } from './social';
 import { Favorite, IStorage, PlayRecord, PublicFavorite, PublicFavoriteDeleteResult, SkipConfig } from './types';
 
 // 搜索历史最大条数
@@ -56,6 +57,10 @@ async function withRetry<T>(
 }
 
 export class UpstashRedisStorage implements IStorage {
+  async socialCommand<T>(command: SocialCommand, payload: object): Promise<T> {
+    const result = await withRetry(() => this.client.eval(SOCIAL_SCRIPT, SOCIAL_KEYS, [command, JSON.stringify(payload)]));
+    return (typeof result === 'string' ? JSON.parse(result) : result) as T;
+  }
   private client: Redis;
 
   constructor() {
@@ -229,6 +234,7 @@ export class UpstashRedisStorage implements IStorage {
 
   // 删除用户及其所有数据
   async deleteUser(userName: string): Promise<void> {
+    await this.socialCommand('delete-user', { user: userName });
     // 删除用户密码
     await withRetry(() => this.client.del(this.userPwdKey(userName)));
 
@@ -522,6 +528,7 @@ export class UpstashRedisStorage implements IStorage {
 
       // 删除管理员配置
       await this.clearPublicFavorites();
+      await this.socialCommand('clear', {});
       await withRetry(() => this.client.del(this.adminConfigKey()));
 
       console.log('所有数据已清空');

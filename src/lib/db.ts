@@ -3,6 +3,7 @@
 import { AdminConfig } from './admin.types';
 import { KvrocksStorage } from './kvrocks.db';
 import { RedisStorage } from './redis.db';
+import type { SocialCommand } from './social';
 import { Favorite, IStorage, PlayRecord, PublicFavorite, PublicFavoriteDeleteResult, SkipConfig } from './types';
 import { UpstashRedisStorage } from './upstash.db';
 
@@ -47,6 +48,9 @@ export function generateStorageKey(source: string, id: string): string {
 
 // 导出便捷方法
 export class DbManager {
+  async socialCommand<T>(command: SocialCommand, payload: object): Promise<T> {
+    return this.storage.socialCommand<T>(command, payload);
+  }
   private storage: IStorage;
   private migrationPromise: Promise<void> | null = null;
 

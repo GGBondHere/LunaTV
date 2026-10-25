@@ -1,4 +1,5 @@
 import { AdminConfig } from './admin.types';
+import type { SocialCommand } from './social';
 
 // 播放记录数据结构
 export interface PlayRecord {
@@ -43,6 +44,7 @@ export type PublicFavoriteDeleteResult = 'deleted' | 'missing' | 'forbidden';
 
 // 存储接口
 export interface IStorage {
+  socialCommand<T>(command: SocialCommand, payload: object): Promise<T>;
   // 播放记录相关
   getPlayRecord(userName: string, key: string): Promise<PlayRecord | null>;
   setPlayRecord(
