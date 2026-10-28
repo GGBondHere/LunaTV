@@ -3,6 +3,7 @@
 import { createClient, RedisClientType } from 'redis';
 
 import { AdminConfig } from './admin.types';
+import { type MediaSettings,MEDIA_SETTINGS_KEY } from './media';
 import { hashPassword, isHashed, verifyPassword } from './password';
 import { DELETE_PUBLIC_FAVORITE_SCRIPT, PUBLIC_FAVORITES_KEY } from './public-favorites';
 import { SOCIAL_KEYS, SOCIAL_SCRIPT, SocialCommand } from './social';
@@ -403,6 +404,15 @@ export abstract class BaseRedisStorage implements IStorage {
     return val ? (JSON.parse(val) as AdminConfig) : null;
   }
 
+  async getMediaSettings(): Promise<MediaSettings | null> {
+    const value = await this.withRetry(() => this.client.get(MEDIA_SETTINGS_KEY));
+    return value ? JSON.parse(value) : null;
+  }
+
+  async setMediaSettings(settings: MediaSettings): Promise<void> {
+    await this.withRetry(() => this.client.set(MEDIA_SETTINGS_KEY, JSON.stringify(settings)));
+  }
+
   async setAdminConfig(config: AdminConfig): Promise<void> {
     await this.withRetry(() =>
       this.client.set(this.adminConfigKey(), JSON.stringify(config))
@@ -628,6 +638,7 @@ export abstract class BaseRedisStorage implements IStorage {
 
       // 删除管理员配置
       await this.clearPublicFavorites();
+      await this.withRetry(() => this.client.del(MEDIA_SETTINGS_KEY));
       await this.socialCommand('clear', {});
       await this.withRetry(() => this.client.del(this.adminConfigKey()));
 

@@ -20,6 +20,9 @@ services:
     container_name: lunatv-app
     ports:
       - '3000:3000'
+    volumes:
+      # 媒体目录自动初始化；使用持久化卷保留视频和上传断点。
+      - media-data:/data/media
     depends_on:
       redis:
         condition: service_healthy
@@ -37,3 +40,4 @@ services:
 
 volumes:
   redis-data:
+  media-data:

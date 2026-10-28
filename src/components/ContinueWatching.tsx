@@ -1,7 +1,7 @@
 /* eslint-disable no-console */
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import type { PlayRecord } from '@/lib/db.client';
 import {
@@ -9,6 +9,8 @@ import {
   getAllPlayRecords,
   subscribeToDataUpdates,
 } from '@/lib/db.client';
+import { type MediaList, type MediaView,MEDIA_SOURCE, mediaCover, mediaEnabled } from '@/lib/media';
+import { currentMediaAccount, mediaRequest } from '@/lib/media.client';
 
 import ScrollableRow from '@/components/ScrollableRow';
 import VideoCard from '@/components/VideoCard';
@@ -22,14 +24,16 @@ export default function ContinueWatching({ className }: ContinueWatchingProps) {
     (PlayRecord & { key: string })[]
   >([]);
   const [loading, setLoading] = useState(true);
+  const media = useRef(new Map<string, MediaView>());
 
   // 处理播放记录数据更新的函数
   const updatePlayRecords = (allRecords: Record<string, PlayRecord>) => {
     // 将记录转换为数组并根据 save_time 由近到远排序
-    const recordsArray = Object.entries(allRecords).map(([key, record]) => ({
-      ...record,
-      key,
-    }));
+    const recordsArray = Object.entries(allRecords).flatMap(([key, record]) => {
+      if (!key.startsWith(`${MEDIA_SOURCE}+`)) return [{ ...record, key }];
+      const item = media.current.get(key.slice(MEDIA_SOURCE.length + 1));
+      return item ? [{ ...record, key, origin: 'upload' as const, title: item.title, cover: mediaCover(item) }] : [];
+    });
 
     // 按 save_time 降序排序（最新的在前面）
     const sortedRecords = recordsArray.sort(
@@ -40,32 +44,65 @@ export default function ContinueWatching({ className }: ContinueWatchingProps) {
   };
 
   useEffect(() => {
+    let active = true;
+    let generation = 0;
+    let metadataGeneration = 0;
+    let metadataLoading: Promise<void> | null = null;
+    let latestRecords: Record<string, PlayRecord> = {};
+    const controller = new AbortController();
     const fetchPlayRecords = async () => {
+      const version = ++generation;
+      const account = currentMediaAccount();
       try {
-        setLoading(true);
 
         // 从缓存或API获取所有播放记录
         const allRecords = await getAllPlayRecords();
+        if (!active || version !== generation || account !== currentMediaAccount()) return;
+        if (mediaEnabled() && Object.keys(allRecords).some((key) => key.startsWith(`${MEDIA_SOURCE}+`))) {
+          const metadataVersion = ++metadataGeneration;
+          const list = await mediaRequest<MediaList>('/api/media', { signal: controller.signal }).catch(() => null);
+          if (!active || version !== generation || metadataVersion !== metadataGeneration || account !== currentMediaAccount()) return;
+          media.current = new Map((list?.items || []).filter((item) => !item.pendingDeletion).map((item) => [item.id, item]));
+        }
+        if (!active || version !== generation || account !== currentMediaAccount()) return;
         updatePlayRecords(allRecords);
       } catch (error) {
         console.error('获取播放记录失败:', error);
-        setPlayRecords([]);
+        if (active && version === generation) setPlayRecords([]);
       } finally {
-        setLoading(false);
+        if (active && version === generation) setLoading(false);
       }
     };
 
     fetchPlayRecords();
+    const refresh = () => { void fetchPlayRecords(); };
+    window.addEventListener('focus', refresh);
+    window.addEventListener('mediaUpdated', refresh);
 
     // 监听播放记录更新事件
     const unsubscribe = subscribeToDataUpdates(
       'playRecordsUpdated',
       (newRecords: Record<string, PlayRecord>) => {
-        updatePlayRecords(newRecords);
+        if (!active) return;
+        latestRecords = newRecords;
+        ++generation;
+        const missing = mediaEnabled() && Object.keys(newRecords).some((key) => key.startsWith(`${MEDIA_SOURCE}+`) && !media.current.has(key.slice(MEDIA_SOURCE.length + 1)));
+        if (!missing) { updatePlayRecords(newRecords); setLoading(false); return; }
+        if (metadataLoading) return;
+        const account = currentMediaAccount();
+        const metadataVersion = ++metadataGeneration;
+        metadataLoading = mediaRequest<MediaList>('/api/media', { signal: controller.signal })
+          .then((list) => {
+            if (!active || metadataVersion !== metadataGeneration || account !== currentMediaAccount()) return;
+            media.current = new Map(list.items.filter((item) => !item.pendingDeletion).map((item) => [item.id, item]));
+            updatePlayRecords(latestRecords);
+          })
+          .catch(() => { if (active && account === currentMediaAccount()) updatePlayRecords(latestRecords); })
+          .finally(() => { metadataLoading = null; if (active && account === currentMediaAccount()) setLoading(false); });
       }
     );
 
-    return unsubscribe;
+    return () => { active = false; controller.abort(); unsubscribe(); window.removeEventListener('focus', refresh); window.removeEventListener('mediaUpdated', refresh); };
   }, []);
 
   // 如果没有播放记录，则不渲染组件
@@ -137,6 +174,7 @@ export default function ContinueWatching({ className }: ContinueWatchingProps) {
                     episodes={record.total_episodes}
                     currentEpisode={record.index}
                     query={record.search_title}
+                    origin={record.origin}
                     from='playrecord'
                     onDelete={() =>
                       setPlayRecords((prev) =>

@@ -6,6 +6,7 @@ import { getConfig, refineConfig } from '@/lib/config';
 import { db } from '@/lib/db';
 import { fetchVideoDetail } from '@/lib/fetchVideoDetail';
 import { refreshLiveChannels } from '@/lib/live';
+import { MEDIA_SOURCE } from '@/lib/media';
 import { SearchResult } from '@/lib/types';
 
 export const runtime = 'nodejs';
@@ -204,6 +205,7 @@ async function refreshRecordAndFavorites() {
         const tasks = entries.map(([key, record]) => async () => {
           try {
             const [source, id] = key.split('+');
+            if (source === MEDIA_SOURCE || record.origin === 'upload') return;
             if (!source || !id) {
               console.warn(`跳过无效的播放记录键: ${key}`);
               return;

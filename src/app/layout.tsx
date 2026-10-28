@@ -93,6 +93,7 @@ export default async function RootLayout({
     CUSTOM_CATEGORIES: customCategories,
     FLUID_SEARCH: fluidSearch,
     ENABLE_WEB_LIVE: enableWebLive,
+    ENABLE_MEDIA: storageType !== 'localstorage',
   };
 
   return (

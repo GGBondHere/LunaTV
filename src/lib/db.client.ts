@@ -15,6 +15,7 @@
  */
 
 import { getAuthInfoFromBrowserCookie } from './auth';
+import { MEDIA_SOURCE } from './media';
 import { SkipConfig } from './types';
 
 // 全局错误触发函数
@@ -30,6 +31,9 @@ function triggerGlobalError(message: string) {
 
 // ---- 类型 ----
 export interface PlayRecord {
+  origin?: 'upload';
+  media_session?: string;
+  media_seq?: number;
   title: string;
   source_name: string;
   year: string;
@@ -1244,6 +1248,16 @@ export function clearUserCache(): void {
   if (STORAGE_TYPE !== 'localstorage') {
     cacheManager.clearUserCache();
   }
+}
+
+// 上传视频由服务端确认进度后更新缓存，避免旧缓存盖过最新续播位置。
+export function syncMediaProgressCache(id: string, record: PlayRecord | null, account: string): void {
+  if (getAuthInfoFromBrowserCookie()?.username !== account || STORAGE_TYPE === 'localstorage') return;
+  const records = { ...(cacheManager.getCachedPlayRecords() || {}) };
+  const key = `${MEDIA_SOURCE}+${id}`;
+  if (record) records[key] = record; else delete records[key];
+  cacheManager.cachePlayRecords(records);
+  window.dispatchEvent(new CustomEvent('playRecordsUpdated', { detail: records }));
 }
 
 /**

@@ -5,6 +5,8 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { getConfig } from '@/lib/config';
 import { db } from '@/lib/db';
+import { MEDIA_SOURCE } from '@/lib/media';
+import { mediaAuth, mediaError, saveMediaProgress } from '@/lib/media.server';
 import { PlayRecord } from '@/lib/types';
 
 export const runtime = 'nodejs';
@@ -96,7 +98,11 @@ export async function POST(request: NextRequest) {
       save_time: record.save_time ?? Date.now(),
     } as PlayRecord;
 
-    await db.savePlayRecord(authInfo.username, source, id, finalRecord);
+    if (source === MEDIA_SOURCE) {
+      try { await mediaAuth(request); await saveMediaProgress(id, authInfo.username, finalRecord); } catch (error) { return mediaError(error); }
+    } else {
+      await db.savePlayRecord(authInfo.username, source, id, finalRecord);
+    }
 
     return NextResponse.json({ success: true }, { status: 200 });
   } catch (err) {

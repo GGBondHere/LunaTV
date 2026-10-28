@@ -31,6 +31,7 @@ import {
   Database,
   ExternalLink,
   FileText,
+  Film,
   FolderOpen,
   Settings,
   Tv,
@@ -45,6 +46,7 @@ import { AdminConfig, AdminConfigResult } from '@/lib/admin.types';
 import { getAuthInfoFromBrowserCookie } from '@/lib/auth';
 
 import DataMigration from '@/components/DataMigration';
+import MediaSettingsPanel from '@/components/MediaSettingsPanel';
 import PageLayout from '@/components/PageLayout';
 
 // 统一按钮样式系统
@@ -4539,6 +4541,7 @@ function AdminPageClient() {
     videoSource: false,
     liveSource: false,
     siteConfig: false,
+    mediaConfig: false,
     categoryConfig: false,
     configFile: false,
     dataMigration: false,
@@ -4684,6 +4687,17 @@ function AdminPageClient() {
             onToggle={() => toggleTab('siteConfig')}
           >
             <SiteConfigComponent config={config} refreshConfig={fetchConfig} />
+          </CollapsibleTab>
+
+          <CollapsibleTab
+            title='共享视频'
+            icon={
+              <Film size={20} className='text-gray-600 dark:text-gray-400' />
+            }
+            isExpanded={expandedTabs.mediaConfig}
+            onToggle={() => toggleTab('mediaConfig')}
+          >
+            <MediaSettingsPanel />
           </CollapsibleTab>
 
           <div className='space-y-4'>

@@ -1,8 +1,12 @@
 import { AdminConfig } from './admin.types';
+import type { MediaSettings } from './media';
 import type { SocialCommand } from './social';
 
 // 播放记录数据结构
 export interface PlayRecord {
+  origin?: 'upload';
+  media_session?: string;
+  media_seq?: number;
   title: string;
   source_name: string;
   cover: string;
@@ -44,6 +48,8 @@ export type PublicFavoriteDeleteResult = 'deleted' | 'missing' | 'forbidden';
 
 // 存储接口
 export interface IStorage {
+  getMediaSettings(): Promise<MediaSettings | null>;
+  setMediaSettings(settings: MediaSettings): Promise<void>;
   socialCommand<T>(command: SocialCommand, payload: object): Promise<T>;
   // 播放记录相关
   getPlayRecord(userName: string, key: string): Promise<PlayRecord | null>;

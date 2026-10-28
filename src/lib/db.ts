@@ -2,6 +2,7 @@
 
 import { AdminConfig } from './admin.types';
 import { KvrocksStorage } from './kvrocks.db';
+import type { MediaSettings } from './media';
 import { RedisStorage } from './redis.db';
 import type { SocialCommand } from './social';
 import { Favorite, IStorage, PlayRecord, PublicFavorite, PublicFavoriteDeleteResult, SkipConfig } from './types';
@@ -48,6 +49,8 @@ export function generateStorageKey(source: string, id: string): string {
 
 // 导出便捷方法
 export class DbManager {
+  getMediaSettings(): Promise<MediaSettings | null> { return this.storage.getMediaSettings(); }
+  setMediaSettings(settings: MediaSettings): Promise<void> { return this.storage.setMediaSettings(settings); }
   async socialCommand<T>(command: SocialCommand, payload: object): Promise<T> {
     return this.storage.socialCommand<T>(command, payload);
   }

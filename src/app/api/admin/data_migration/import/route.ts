@@ -8,6 +8,7 @@ import { getAuthInfoFromCookie } from '@/lib/auth';
 import { configSelfCheck, setCachedConfig } from '@/lib/config';
 import { SimpleCrypto } from '@/lib/crypto';
 import { db } from '@/lib/db';
+import { parseMediaSettings } from '@/lib/media';
 import { parsePublicFavoritesBackup } from '@/lib/public-favorites';
 import { parseChatBackup } from '@/lib/social';
 
@@ -82,9 +83,11 @@ export async function POST(req: NextRequest) {
     // 在任何清空操作前验证公共数据；旧备份没有此字段时恢复为空列表。
     let publicFavorites;
     let chat;
+    let mediaSettings;
     try {
       publicFavorites = parsePublicFavoritesBackup(importData.data.publicFavorites);
       chat = parseChatBackup(importData.data.chat);
+      mediaSettings = parseMediaSettings(importData.data.mediaSettings);
     } catch (error) {
       return NextResponse.json(
         { error: error instanceof Error ? error.message : '公共收藏格式无效' },
@@ -94,6 +97,7 @@ export async function POST(req: NextRequest) {
 
     // 开始导入数据 - 先清空现有数据
     await db.clearAllData();
+    await db.setMediaSettings(mediaSettings);
 
     // 导入管理员配置
     importData.data.adminConfig = configSelfCheck(importData.data.adminConfig);

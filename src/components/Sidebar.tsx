@@ -2,7 +2,7 @@
 
 'use client';
 
-import { Cat, Clover, Film, Home, Menu, Radio, Search, Star, Tv, Users } from 'lucide-react';
+import { Cat, Clover, Film, Home, Menu, Radio, Search, Star, Tv, Users, Video } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import {
@@ -184,7 +184,7 @@ const Sidebar = ({ onToggle, activePath = '/' }: SidebarProps) => {
     { icon: Home, label: '首页', href: '/' },
     { icon: Search, label: '搜索', href: '/search' },
     ...(publicFavoritesEnabled
-      ? [{ icon: Users, label: '公共收藏', href: '/shared' }]
+      ? [{ icon: Users, label: '公共收藏', href: '/shared' }, { icon: Video, label: '共享视频', href: '/media' }]
       : []),
   ];
 

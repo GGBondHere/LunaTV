@@ -22,7 +22,7 @@ interface MobileActionSheetProps {
   sourceName?: string; // 播放源名称
   currentEpisode?: number; // 当前集数
   totalEpisodes?: number; // 总集数
-  origin?: 'vod' | 'live';
+  origin?: 'vod' | 'live' | 'upload';
 }
 
 const MobileActionSheet: React.FC<MobileActionSheetProps> = ({

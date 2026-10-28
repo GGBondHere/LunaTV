@@ -3,6 +3,7 @@
 import { Redis } from '@upstash/redis';
 
 import { AdminConfig } from './admin.types';
+import { type MediaSettings,MEDIA_SETTINGS_KEY } from './media';
 import { hashPassword, isHashed, verifyPassword } from './password';
 import { DELETE_PUBLIC_FAVORITE_SCRIPT, PUBLIC_FAVORITES_KEY } from './public-favorites';
 import { SOCIAL_KEYS, SOCIAL_SCRIPT, SocialCommand } from './social';
@@ -306,6 +307,14 @@ export class UpstashRedisStorage implements IStorage {
     return val ? (val as AdminConfig) : null;
   }
 
+  async getMediaSettings(): Promise<MediaSettings | null> {
+    return await withRetry(() => this.client.get<MediaSettings>(MEDIA_SETTINGS_KEY));
+  }
+
+  async setMediaSettings(settings: MediaSettings): Promise<void> {
+    await withRetry(() => this.client.set(MEDIA_SETTINGS_KEY, settings));
+  }
+
   async setAdminConfig(config: AdminConfig): Promise<void> {
     await withRetry(() => this.client.set(this.adminConfigKey(), config));
   }
@@ -528,6 +537,7 @@ export class UpstashRedisStorage implements IStorage {
 
       // 删除管理员配置
       await this.clearPublicFavorites();
+      await withRetry(() => this.client.del(MEDIA_SETTINGS_KEY));
       await this.socialCommand('clear', {});
       await withRetry(() => this.client.del(this.adminConfigKey()));
 

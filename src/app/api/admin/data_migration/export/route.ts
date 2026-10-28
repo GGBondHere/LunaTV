@@ -7,6 +7,7 @@ import { gzip } from 'zlib';
 import { getAuthInfoFromCookie } from '@/lib/auth';
 import { SimpleCrypto } from '@/lib/crypto';
 import { db } from '@/lib/db';
+import { parseMediaSettings } from '@/lib/media';
 import { CURRENT_VERSION } from '@/lib/version';
 
 export const runtime = 'nodejs';
@@ -54,6 +55,7 @@ export async function POST(req: NextRequest) {
         // 管理员配置
         adminConfig: config,
         publicFavorites: await db.getAllPublicFavorites(),
+        mediaSettings: parseMediaSettings(await db.getMediaSettings()),
         chat: await db.socialCommand('export', {}),
         // 所有用户数据
         userData: {} as { [username: string]: any }

@@ -9,7 +9,7 @@ import CapsuleSwitch from './CapsuleSwitch';
 export default function CollectionTabs({
   active,
 }: {
-  active: 'home' | 'favorites' | 'shared';
+  active: 'home' | 'favorites' | 'shared' | 'media';
 }) {
   const router = useRouter();
   const enabled = usePublicFavoritesEnabled();
@@ -18,12 +18,14 @@ export default function CollectionTabs({
       options={[
         { label: '首页', value: 'home' },
         { label: '收藏夹', value: 'favorites' },
-        ...(enabled ? [{ label: '公共收藏', value: 'shared' }] : []),
+        ...(enabled ? [{ label: '公共收藏', value: 'shared' }, { label: '共享视频', value: 'media' }] : []),
       ]}
       active={active}
       onChange={(value) =>
         router.push(
-          value === 'shared'
+          value === 'media'
+            ? '/media'
+            : value === 'shared'
             ? '/shared'
             : value === 'favorites'
             ? '/?tab=favorites'

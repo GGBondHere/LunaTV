@@ -51,7 +51,7 @@ export interface VideoCardProps {
   isBangumi?: boolean;
   isAggregate?: boolean;
   favoriteTarget?: SearchResult;
-  origin?: 'vod' | 'live';
+  origin?: 'vod' | 'live' | 'upload';
 }
 
 export type VideoCardHandle = {
@@ -149,7 +149,7 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
 
   // 获取收藏状态（搜索结果页面不检查）
   useEffect(() => {
-    if (from === 'douban' || from === 'search' || !actualSource || !actualId) return;
+    if (origin === 'upload' || from === 'douban' || from === 'search' || !actualSource || !actualId) return;
 
     const fetchFavoriteStatus = async () => {
       try {
@@ -174,7 +174,7 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
     );
 
     return unsubscribe;
-  }, [from, actualSource, actualId]);
+  }, [from, actualSource, actualId, origin]);
 
   const handleToggleFavorite = useCallback(
     async (e: React.MouseEvent) => {
@@ -236,7 +236,9 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
   );
 
   const handleClick = useCallback(() => {
-    if (origin === 'live' && actualSource && actualId) {
+    if (origin === 'upload' && actualId) {
+      router.push(`/media/${actualId}`);
+    } else if (origin === 'live' && actualSource && actualId) {
       // 直播内容跳转到直播页面
       const url = `/live?source=${actualSource.replace('live_', '')}&id=${actualId.replace('live_', '')}`;
       router.push(url);
@@ -267,7 +269,9 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
 
   // 新标签页播放处理函数
   const handlePlayInNewTab = useCallback(() => {
-    if (origin === 'live' && actualSource && actualId) {
+    if (origin === 'upload' && actualId) {
+      window.open(`/media/${actualId}`, '_blank', 'noopener');
+    } else if (origin === 'live' && actualSource && actualId) {
       // 直播内容跳转到直播页面
       const url = `/live?source=${actualSource.replace('live_', '')}&id=${actualId.replace('live_', '')}`;
       window.open(url, '_blank');
@@ -381,8 +385,9 @@ const VideoCard = forwardRef<VideoCardHandle, VideoCardProps>(function VideoCard
         showYear: false,
       },
     };
-    return configs[from] || configs.search;
-  }, [from, isAggregate, douban_id, rate]);
+    const display = configs[from] || configs.search;
+    return origin === 'upload' ? { ...display, showHeart: false, showDoubanLink: false } : display;
+  }, [from, isAggregate, douban_id, rate, origin]);
 
   // 移动端操作菜单配置
   const mobileActions = useMemo(() => {
