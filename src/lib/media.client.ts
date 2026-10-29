@@ -19,8 +19,9 @@ export function assertMediaAccount(account: string) {
 }
 export async function mediaRequest<T>(
   url: string,
-  options: RequestInit = {}
+  options: RequestInit & { timeoutMs?: number } = {}
 ): Promise<T> {
+  const { timeoutMs = 45000, ...requestOptions } = options;
   const account = currentMediaAccount();
   const controller = new AbortController();
   const abort = () => controller.abort();
@@ -30,11 +31,11 @@ export async function mediaRequest<T>(
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
-  }, 45000);
+  }, timeoutMs);
   try {
     assertMediaAccount(account);
     const response = await fetch(url, {
-      ...options,
+      ...requestOptions,
       credentials: 'same-origin',
       cache: 'no-store',
       signal: controller.signal,
@@ -53,7 +54,12 @@ export async function mediaRequest<T>(
     return data as T;
   } catch (error) {
     assertMediaAccount(account);
-    if (timedOut) throw new MediaClientError('连接超时，已上传的断点仍然保留');
+    if (timedOut)
+      throw new MediaClientError(
+        url === '/api/admin/media/check'
+          ? '连接检查超时，请检查地址是否可达'
+          : '连接超时，已上传的断点仍然保留'
+      );
     throw error;
   } finally {
     clearTimeout(timer);
@@ -64,11 +70,13 @@ export function mediaJSON<T>(
   url: string,
   method: string,
   data?: unknown,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  timeoutMs?: number
 ) {
   return mediaRequest<T>(url, {
     method,
     signal,
+    timeoutMs,
     headers: { 'Content-Type': 'application/json' },
     body: data === undefined ? undefined : JSON.stringify(data),
   });

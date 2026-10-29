@@ -9,7 +9,13 @@ import {
   getAllPlayRecords,
   subscribeToDataUpdates,
 } from '@/lib/db.client';
-import { type MediaList, type MediaView,MEDIA_SOURCE, mediaCover, mediaEnabled } from '@/lib/media';
+import {
+  type MediaList,
+  type MediaView,
+  MEDIA_SOURCE,
+  mediaCover,
+  mediaEnabled,
+} from '@/lib/media';
 import { currentMediaAccount, mediaRequest } from '@/lib/media.client';
 
 import ScrollableRow from '@/components/ScrollableRow';
@@ -32,7 +38,17 @@ export default function ContinueWatching({ className }: ContinueWatchingProps) {
     const recordsArray = Object.entries(allRecords).flatMap(([key, record]) => {
       if (!key.startsWith(`${MEDIA_SOURCE}+`)) return [{ ...record, key }];
       const item = media.current.get(key.slice(MEDIA_SOURCE.length + 1));
-      return item ? [{ ...record, key, origin: 'upload' as const, title: item.title, cover: mediaCover(item) }] : [];
+      return item
+        ? [
+            {
+              ...record,
+              key,
+              origin: 'upload' as const,
+              title: item.title,
+              cover: mediaCover(item),
+            },
+          ]
+        : [];
     });
 
     // 按 save_time 降序排序（最新的在前面）
@@ -54,17 +70,43 @@ export default function ContinueWatching({ className }: ContinueWatchingProps) {
       const version = ++generation;
       const account = currentMediaAccount();
       try {
-
         // 从缓存或API获取所有播放记录
         const allRecords = await getAllPlayRecords();
-        if (!active || version !== generation || account !== currentMediaAccount()) return;
-        if (mediaEnabled() && Object.keys(allRecords).some((key) => key.startsWith(`${MEDIA_SOURCE}+`))) {
+        if (
+          !active ||
+          version !== generation ||
+          account !== currentMediaAccount()
+        )
+          return;
+        if (
+          mediaEnabled() &&
+          Object.keys(allRecords).some((key) =>
+            key.startsWith(`${MEDIA_SOURCE}+`)
+          )
+        ) {
           const metadataVersion = ++metadataGeneration;
-          const list = await mediaRequest<MediaList>('/api/media', { signal: controller.signal }).catch(() => null);
-          if (!active || version !== generation || metadataVersion !== metadataGeneration || account !== currentMediaAccount()) return;
-          media.current = new Map((list?.items || []).filter((item) => !item.pendingDeletion).map((item) => [item.id, item]));
+          const list = await mediaRequest<MediaList>('/api/media', {
+            signal: controller.signal,
+          }).catch(() => null);
+          if (
+            !active ||
+            version !== generation ||
+            metadataVersion !== metadataGeneration ||
+            account !== currentMediaAccount()
+          )
+            return;
+          media.current = new Map(
+            (list?.items || [])
+              .filter((item) => !item.pendingDeletion && !item.unavailable)
+              .map((item) => [item.id, item])
+          );
         }
-        if (!active || version !== generation || account !== currentMediaAccount()) return;
+        if (
+          !active ||
+          version !== generation ||
+          account !== currentMediaAccount()
+        )
+          return;
         updatePlayRecords(allRecords);
       } catch (error) {
         console.error('获取播放记录失败:', error);
@@ -75,7 +117,9 @@ export default function ContinueWatching({ className }: ContinueWatchingProps) {
     };
 
     fetchPlayRecords();
-    const refresh = () => { void fetchPlayRecords(); };
+    const refresh = () => {
+      void fetchPlayRecords();
+    };
     window.addEventListener('focus', refresh);
     window.addEventListener('mediaUpdated', refresh);
 
@@ -86,23 +130,56 @@ export default function ContinueWatching({ className }: ContinueWatchingProps) {
         if (!active) return;
         latestRecords = newRecords;
         ++generation;
-        const missing = mediaEnabled() && Object.keys(newRecords).some((key) => key.startsWith(`${MEDIA_SOURCE}+`) && !media.current.has(key.slice(MEDIA_SOURCE.length + 1)));
-        if (!missing) { updatePlayRecords(newRecords); setLoading(false); return; }
+        const missing =
+          mediaEnabled() &&
+          Object.keys(newRecords).some(
+            (key) =>
+              key.startsWith(`${MEDIA_SOURCE}+`) &&
+              !media.current.has(key.slice(MEDIA_SOURCE.length + 1))
+          );
+        if (!missing) {
+          updatePlayRecords(newRecords);
+          setLoading(false);
+          return;
+        }
         if (metadataLoading) return;
         const account = currentMediaAccount();
         const metadataVersion = ++metadataGeneration;
-        metadataLoading = mediaRequest<MediaList>('/api/media', { signal: controller.signal })
+        metadataLoading = mediaRequest<MediaList>('/api/media', {
+          signal: controller.signal,
+        })
           .then((list) => {
-            if (!active || metadataVersion !== metadataGeneration || account !== currentMediaAccount()) return;
-            media.current = new Map(list.items.filter((item) => !item.pendingDeletion).map((item) => [item.id, item]));
+            if (
+              !active ||
+              metadataVersion !== metadataGeneration ||
+              account !== currentMediaAccount()
+            )
+              return;
+            media.current = new Map(
+              list.items
+                .filter((item) => !item.pendingDeletion && !item.unavailable)
+                .map((item) => [item.id, item])
+            );
             updatePlayRecords(latestRecords);
           })
-          .catch(() => { if (active && account === currentMediaAccount()) updatePlayRecords(latestRecords); })
-          .finally(() => { metadataLoading = null; if (active && account === currentMediaAccount()) setLoading(false); });
+          .catch(() => {
+            if (active && account === currentMediaAccount())
+              updatePlayRecords(latestRecords);
+          })
+          .finally(() => {
+            metadataLoading = null;
+            if (active && account === currentMediaAccount()) setLoading(false);
+          });
       }
     );
 
-    return () => { active = false; controller.abort(); unsubscribe(); window.removeEventListener('focus', refresh); window.removeEventListener('mediaUpdated', refresh); };
+    return () => {
+      active = false;
+      controller.abort();
+      unsubscribe();
+      window.removeEventListener('focus', refresh);
+      window.removeEventListener('mediaUpdated', refresh);
+    };
   }, []);
 
   // 如果没有播放记录，则不渲染组件

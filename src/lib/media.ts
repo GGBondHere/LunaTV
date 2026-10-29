@@ -9,6 +9,128 @@ export interface MediaSettings {
   quotaGiB: number;
   maxFileGiB: number;
   minFreeGiB: number;
+  uploadStorage?: 'local' | 'webdav';
+  activeConnectionId?: string;
+  remoteQuotaGiB?: number | null;
+  connections?: MediaConnection[];
+  localScan?: MediaScanSettings;
+}
+export interface MediaScanSettings {
+  root: string;
+  recursive: boolean;
+  automatic: boolean;
+  intervalMinutes: number;
+}
+export const DEFAULT_LOCAL_SCAN: MediaScanSettings = {
+  root: '/',
+  recursive: true,
+  automatic: false,
+  intervalMinutes: 60,
+};
+export interface MediaConnection {
+  id: string;
+  url: string;
+  root: string;
+  username: string;
+  password: string;
+  scan: MediaScanSettings;
+}
+export type MediaConnectionView = Omit<MediaConnection, 'password'> & {
+  hasPassword: boolean;
+  references?: number;
+};
+export interface CloudCapacity {
+  total: number | null;
+  used: number | null;
+  free: number | null;
+  checkedAt: number;
+  error?: string;
+  diagnostics?: string[];
+  scope?: 'mount' | 'aggregate';
+  mountCount?: number;
+  stale?: boolean;
+  attemptedAt?: number;
+}
+export interface MediaRemoteService {
+  kind: 'openlist' | 'webdav' | 'unknown';
+  canScan: boolean;
+  message: string;
+}
+export interface MediaConnectionCheck {
+  results: { name: string; ok: boolean | null; message: string }[];
+  capacity: CloudCapacity;
+  service: MediaRemoteService;
+  url: string;
+}
+export interface MediaScanStatus {
+  id: string;
+  connectionId: string;
+  state:
+    | 'running'
+    | 'stopping'
+    | 'completed'
+    | 'cancelled'
+    | 'interrupted'
+    | 'failed';
+  startedAt: number;
+  finishedAt?: number;
+  lastSuccessAt?: number;
+  added: number;
+  updated: number;
+  skipped: number;
+  removed?: number;
+  failed: number;
+  visited: number;
+  details: { path: string; reason: string }[];
+  error?: string;
+}
+export interface MediaAdminPolicy extends Omit<MediaPolicy, 'settings'> {
+  settings: Omit<MediaSettings, 'connections'> & {
+    connections: MediaConnectionView[];
+  };
+  capacity?: CloudCapacity;
+  remoteService?: MediaRemoteService;
+  localUsedBytes: number;
+  localReservedBytes: number;
+  localDirectory: string;
+  pendingDeletes: {
+    id: string;
+    title: string;
+    path?: string;
+    location?: 'local' | 'webdav';
+  }[];
+  missingConnections: { id: string; references: number }[];
+  scans: MediaScanStatus[];
+}
+
+export function mediaRelativePath(value: string): string {
+  if (
+    typeof value !== 'string' ||
+    /[\\?#]/.test(value) ||
+    Array.from(value).some((char) => char.charCodeAt(0) < 32) ||
+    value.split('/').some((p) => p === '.' || p === '..')
+  )
+    throw new Error('目录包含不允许的路径字符');
+  return '/' + value.split('/').filter(Boolean).join('/');
+}
+function mediaURL(value: unknown) {
+  if (typeof value !== 'string') throw new Error('请填写连接地址');
+  const url = new URL(value.trim());
+  if (
+    !['http:', 'https:'].includes(url.protocol) ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  )
+    throw new Error('连接地址仅支持不带账号、查询参数的 HTTP/HTTPS 地址');
+  return url.toString().replace(/\/$/, '');
+}
+export function mediaApiURL(value: string) {
+  return value
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\/dav$/i, '');
 }
 export const DEFAULT_MEDIA_SETTINGS: MediaSettings = {
   allowUploads: true,
@@ -19,7 +141,7 @@ export const DEFAULT_MEDIA_SETTINGS: MediaSettings = {
 
 export function parseMediaSettings(value: unknown): MediaSettings {
   if (value === undefined || value === null)
-    return { ...DEFAULT_MEDIA_SETTINGS };
+    return { ...DEFAULT_MEDIA_SETTINGS, localScan: { ...DEFAULT_LOCAL_SCAN } };
   const input = value as MediaSettings;
   if (
     typeof input !== 'object' ||
@@ -38,11 +160,97 @@ export function parseMediaSettings(value: unknown): MediaSettings {
       '请填写有效容量：总额度和单文件上限必须大于零，单文件不能超过总额度，磁盘保留空间至少为 1 GiB'
     );
   }
+  const connections: MediaConnection[] = [];
+  if (input.connections !== undefined) {
+    if (!Array.isArray(input.connections) || input.connections.length > 30)
+      throw new Error('存储连接配置无效');
+    for (const c of input.connections) {
+      if (
+        !c ||
+        typeof c.id !== 'string' ||
+        c.id === 'local' ||
+        !/^[a-zA-Z0-9_-]{1,80}$/.test(c.id) ||
+        connections.some((x) => x.id === c.id)
+      )
+        throw new Error('存储连接标识无效或重复');
+      if (
+        ![c.username, c.password].every(
+          (x) => typeof x === 'string' && x.length <= 4096 && !/[\r\n]/.test(x)
+        )
+      )
+        throw new Error('存储连接凭据无效');
+      const scan = c.scan;
+      if (
+        !scan ||
+        typeof scan.recursive !== 'boolean' ||
+        typeof scan.automatic !== 'boolean' ||
+        !Number.isInteger(scan.intervalMinutes) ||
+        scan.intervalMinutes < 5 ||
+        scan.intervalMinutes > 10080
+      )
+        throw new Error('扫描间隔需为 5–10080 分钟');
+      const root = mediaRelativePath(c.root);
+      const scanRoot = mediaRelativePath(scan.root);
+      if (root !== '/' && scanRoot !== root && !scanRoot.startsWith(root + '/'))
+        throw new Error('扫描目录必须在存储目录内');
+      connections.push({
+        id: c.id,
+        url: mediaURL(c.url),
+        root,
+        username: c.username,
+        password: c.password,
+        scan: {
+          root: scanRoot,
+          recursive: scan.recursive,
+          automatic: scan.automatic,
+          intervalMinutes: scan.intervalMinutes,
+        },
+      });
+    }
+  }
+  const storage = input.uploadStorage ?? 'local';
+  if (storage !== 'local' && storage !== 'webdav')
+    throw new Error('请选择有效存储类型');
+  if (
+    storage === 'webdav' &&
+    !connections.some((c) => c.id === input.activeConnectionId)
+  )
+    throw new Error('请选择 WebDAV 连接');
+  const remoteQuotaGiB = input.remoteQuotaGiB ?? null;
+  if (
+    remoteQuotaGiB !== null &&
+    (typeof remoteQuotaGiB !== 'number' ||
+      !Number.isFinite(remoteQuotaGiB) ||
+      remoteQuotaGiB <= 0 ||
+      !Number.isSafeInteger(Math.round(remoteQuotaGiB * GiB)) ||
+      input.maxFileGiB > remoteQuotaGiB)
+  )
+    throw new Error('WebDAV 站点额度无效或小于单文件上限');
+  const localScan = input.localScan ?? DEFAULT_LOCAL_SCAN;
+  if (
+    !localScan ||
+    typeof localScan.recursive !== 'boolean' ||
+    typeof localScan.automatic !== 'boolean' ||
+    !Number.isInteger(localScan.intervalMinutes) ||
+    localScan.intervalMinutes < 5 ||
+    localScan.intervalMinutes > 10080
+  )
+    throw new Error('本地扫描配置无效，扫描间隔需为 5–10080 分钟');
   return {
     allowUploads: input.allowUploads,
     quotaGiB: input.quotaGiB,
     maxFileGiB: input.maxFileGiB,
     minFreeGiB: input.minFreeGiB,
+    uploadStorage: storage,
+    activeConnectionId: input.activeConnectionId,
+    remoteQuotaGiB,
+    connections,
+    localScan: {
+      root: mediaRelativePath(localScan.root),
+      recursive: localScan.recursive,
+      automatic: localScan.automatic,
+      intervalMinutes: localScan.intervalMinutes,
+    },
   };
 }
 
@@ -55,9 +263,14 @@ export interface MediaView {
   bytes: number;
   createdAt: number;
   revision: string;
+  contentRevision?: string;
   hasCover: boolean;
   canManage: boolean;
   pendingDeletion?: boolean;
+  unavailable?: boolean;
+  // Only returned to administrators for the deletion confirmation.
+  deletePath?: string;
+  deleteLocation?: 'local' | 'webdav';
 }
 export interface UploadView {
   id: string;
@@ -69,18 +282,26 @@ export interface UploadView {
   hashes: string[];
   hasCover: boolean;
   updatedAt: number;
-  status: 'uploading' | 'processing' | 'ready' | 'failed';
+  status: 'uploading' | 'processing' | 'ready' | 'failed' | 'cancelling';
+  stage?: string;
+  retryable?: boolean;
   error?: string;
 }
 export interface MediaPolicy {
   enabled: boolean;
+  uploadAvailable?: boolean;
   reason: string;
   settings: MediaSettings;
   usedBytes: number;
   reservedBytes: number;
   freeBytes: number;
+  // Upload admission includes the local space needed to stage the whole file.
   availableBytes: number;
+  // Destination capacity excludes temporary local staging constraints.
+  storageAvailableBytes?: number;
+  availableBytesKnown?: boolean;
   overQuota: boolean;
+  quotaBytes?: number | null;
 }
 export interface MediaList {
   items: MediaView[];

@@ -31,7 +31,8 @@ export default function MediaCard({
   const router = useRouter();
   const [menu, setMenu] = useState(false);
   const play = () => {
-    if (!item.pendingDeletion) router.push(`/media/${item.id}`);
+    if (!item.pendingDeletion && !item.unavailable)
+      router.push(`/media/${item.id}`);
   };
   const longPress = useLongPress({
     onLongPress: () => setMenu(true),
@@ -39,7 +40,7 @@ export default function MediaCard({
     longPressDelay: 500,
   });
   const actions = [
-    ...(!item.pendingDeletion
+    ...(!item.pendingDeletion && !item.unavailable
       ? [
           {
             id: 'play',
@@ -118,7 +119,11 @@ export default function MediaCard({
             </div>
           )}
           <span className='absolute bottom-2 right-2 rounded bg-black/70 px-1.5 py-0.5 text-xs tabular-nums text-white'>
-            {item.pendingDeletion ? '等待清理' : mediaDuration(item.duration)}
+            {item.pendingDeletion
+              ? '等待清理'
+              : item.unavailable
+              ? '源文件暂不可用'
+              : mediaDuration(item.duration)}
           </span>
           {progress > 0 && !item.pendingDeletion && (
             <div

@@ -76,7 +76,9 @@ const withPWA = require('next-pwa')({
   skipWaiting: true,
   runtimeCaching: [
     {
-      urlPattern: ({ url }) => url.pathname.startsWith('/api/media') || url.pathname === '/api/admin/media',
+      urlPattern: ({ url }) =>
+        url.pathname.startsWith('/api/media') ||
+        url.pathname.startsWith('/api/admin/media'),
       handler: 'NetworkOnly',
     },
     ...require('next-pwa/cache'),

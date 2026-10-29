@@ -7,7 +7,11 @@ import { Suspense, useEffect, useRef, useState } from 'react';
 
 import { type PlayRecord, syncMediaProgressCache } from '@/lib/db.client';
 import { type MediaView, mediaCover, mediaDuration } from '@/lib/media';
-import { currentMediaAccount, mediaRequest } from '@/lib/media.client';
+import {
+  currentMediaAccount,
+  MediaClientError,
+  mediaRequest,
+} from '@/lib/media.client';
 
 import PageLayout from '@/components/PageLayout';
 
@@ -22,7 +26,9 @@ function MediaPlayer() {
     let art: Artplayer | undefined;
     let interval: ReturnType<typeof setInterval> | undefined;
     let playing = false;
+    let contentRevision: string | undefined;
     let saving = false;
+    let progressInvalid = false;
     let saveSequence = 0;
     const session = Array.from(
       crypto.getRandomValues(new Uint8Array(16)),
@@ -37,7 +43,14 @@ function MediaPlayer() {
     setError('');
     setNote('');
     const save = async (leaving = false) => {
-      if (!current() || !art || !playing || (!leaving && saving)) return;
+      if (
+        !current() ||
+        progressInvalid ||
+        !art ||
+        !playing ||
+        (!leaving && saving)
+      )
+        return;
       const position = art.currentTime;
       if (!Number.isFinite(position)) return;
       if (leaving && finalPosition === position && Date.now() - finalAt < 1000)
@@ -57,6 +70,7 @@ function MediaPlayer() {
               play_time: position,
               media_session: session,
               media_seq: sequence,
+              media_revision: contentRevision,
             }),
             keepalive: leaving,
             ...(leaving ? {} : { signal: controller.signal }),
@@ -67,6 +81,26 @@ function MediaPlayer() {
           if (active) setNote('');
         }
       } catch (failure) {
+        if (
+          current() &&
+          failure instanceof MediaClientError &&
+          (failure.status === 404 ||
+            failure.code === 'MEDIA_CHANGED' ||
+            failure.code === 'SOURCE_UNAVAILABLE' ||
+            failure.code === 'MEDIA_UNAVAILABLE')
+        ) {
+          progressInvalid = true;
+          saveSequence++;
+          if (interval) clearInterval(interval);
+          syncMediaProgressCache(id, null, account);
+          art?.pause();
+          setError(
+            failure.code === 'MEDIA_CHANGED'
+              ? '视频内容已更新，请重新打开'
+              : '视频已被移除或暂不可用，请返回共享视频'
+          );
+          return;
+        }
         if (current() && sequence === saveSequence)
           setNote(`进度暂未保存：${(failure as Error).message}`);
       } finally {
@@ -97,6 +131,7 @@ function MediaPlayer() {
           }),
         ]);
         if (!current() || !container.current) return;
+        contentRevision = metadata.contentRevision;
         setItem(metadata);
         Artplayer.FULLSCREEN_WEB_IN_BODY = true;
         art = new Artplayer({
@@ -147,8 +182,11 @@ function MediaPlayer() {
           if (art?.playing) void save();
         }, 10000);
       } catch (failure) {
-        if (current() && !controller.signal.aborted)
+        if (current() && !controller.signal.aborted) {
+          if (failure instanceof MediaClientError && failure.status === 404)
+            syncMediaProgressCache(id, null, account);
           setError((failure as Error).message);
+        }
       }
     };
     void load();

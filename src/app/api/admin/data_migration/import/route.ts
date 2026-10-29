@@ -9,6 +9,7 @@ import { configSelfCheck, setCachedConfig } from '@/lib/config';
 import { SimpleCrypto } from '@/lib/crypto';
 import { db } from '@/lib/db';
 import { parseMediaSettings } from '@/lib/media';
+import { withMediaRestore } from '@/lib/media.server';
 import { parsePublicFavoritesBackup } from '@/lib/public-favorites';
 import { parseChatBackup } from '@/lib/social';
 
@@ -35,7 +36,10 @@ export async function POST(req: NextRequest) {
 
     // 检查用户权限（只有站长可以导入数据）
     if (authInfo.username !== process.env.USERNAME) {
-      return NextResponse.json({ error: '权限不足，只有站长可以导入数据' }, { status: 401 });
+      return NextResponse.json(
+        { error: '权限不足，只有站长可以导入数据' },
+        { status: 401 }
+      );
     }
 
     // 解析表单数据
@@ -59,7 +63,10 @@ export async function POST(req: NextRequest) {
     try {
       decryptedData = SimpleCrypto.decrypt(encryptedData, password);
     } catch (error) {
-      return NextResponse.json({ error: '解密失败，请检查密码是否正确' }, { status: 400 });
+      return NextResponse.json(
+        { error: '解密失败，请检查密码是否正确' },
+        { status: 400 }
+      );
     }
 
     // 解压缩数据
@@ -76,16 +83,22 @@ export async function POST(req: NextRequest) {
     }
 
     // 验证数据格式
-    if (!importData.data || !importData.data.adminConfig || !importData.data.userData) {
+    if (
+      !importData.data ||
+      !importData.data.adminConfig ||
+      !importData.data.userData
+    ) {
       return NextResponse.json({ error: '备份文件格式无效' }, { status: 400 });
     }
 
     // 在任何清空操作前验证公共数据；旧备份没有此字段时恢复为空列表。
-    let publicFavorites;
-    let chat;
-    let mediaSettings;
+    let publicFavorites: ReturnType<typeof parsePublicFavoritesBackup>;
+    let chat: ReturnType<typeof parseChatBackup>;
+    let mediaSettings: ReturnType<typeof parseMediaSettings>;
     try {
-      publicFavorites = parsePublicFavoritesBackup(importData.data.publicFavorites);
+      publicFavorites = parsePublicFavoritesBackup(
+        importData.data.publicFavorites
+      );
       chat = parseChatBackup(importData.data.chat);
       mediaSettings = parseMediaSettings(importData.data.mediaSettings);
     } catch (error) {
@@ -95,69 +108,76 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // 开始导入数据 - 先清空现有数据
-    await db.clearAllData();
-    await db.setMediaSettings(mediaSettings);
+    return await withMediaRestore(mediaSettings, async () => {
+      // 开始导入数据 - 先清空现有数据
+      await db.clearAllData();
+      await db.setMediaSettings(mediaSettings);
 
-    // 导入管理员配置
-    importData.data.adminConfig = configSelfCheck(importData.data.adminConfig);
-    await db.saveAdminConfig(importData.data.adminConfig);
-    await setCachedConfig(importData.data.adminConfig);
+      // 导入管理员配置
+      importData.data.adminConfig = configSelfCheck(
+        importData.data.adminConfig
+      );
+      await db.saveAdminConfig(importData.data.adminConfig);
+      await setCachedConfig(importData.data.adminConfig);
 
-    // 导入用户数据
-    const userData = importData.data.userData;
-    for (const username in userData) {
-      const user = userData[username];
+      // 导入用户数据
+      const userData = importData.data.userData;
+      for (const username in userData) {
+        const user = userData[username];
 
-      // 重新注册用户（包含密码）
-      if (user.password) {
-        await db.registerUser(username, user.password);
-      }
-
-      // 导入播放记录
-      if (user.playRecords) {
-        for (const [key, record] of Object.entries(user.playRecords)) {
-          await (db as any).storage.setPlayRecord(username, key, record);
+        // 重新注册用户（包含密码）
+        if (user.password) {
+          await db.registerUser(username, user.password);
         }
-      }
 
-      // 导入收藏夹
-      if (user.favorites) {
-        for (const [key, favorite] of Object.entries(user.favorites)) {
-          await (db as any).storage.setFavorite(username, key, favorite);
+        // 导入播放记录
+        if (user.playRecords) {
+          for (const [key, record] of Object.entries(user.playRecords)) {
+            await (db as any).storage.setPlayRecord(username, key, record);
+          }
         }
-      }
 
-      // 导入搜索历史
-      if (user.searchHistory && Array.isArray(user.searchHistory)) {
-        for (const keyword of user.searchHistory.reverse()) { // 反转以保持顺序
-          await db.addSearchHistory(username, keyword);
+        // 导入收藏夹
+        if (user.favorites) {
+          for (const [key, favorite] of Object.entries(user.favorites)) {
+            await (db as any).storage.setFavorite(username, key, favorite);
+          }
         }
-      }
 
-      // 导入跳过片头片尾配置
-      if (user.skipConfigs) {
-        for (const [key, skipConfig] of Object.entries(user.skipConfigs)) {
-          const [source, id] = key.split('+');
-          if (source && id) {
-            await db.setSkipConfig(username, source, id, skipConfig as any);
+        // 导入搜索历史
+        if (user.searchHistory && Array.isArray(user.searchHistory)) {
+          for (const keyword of user.searchHistory.reverse()) {
+            // 反转以保持顺序
+            await db.addSearchHistory(username, keyword);
+          }
+        }
+
+        // 导入跳过片头片尾配置
+        if (user.skipConfigs) {
+          for (const [key, skipConfig] of Object.entries(user.skipConfigs)) {
+            const [source, id] = key.split('+');
+            if (source && id) {
+              await db.setSkipConfig(username, source, id, skipConfig as any);
+            }
           }
         }
       }
-    }
 
-    for (const [key, favorite] of Object.entries(publicFavorites)) {
-      await db.addPublicFavorite(key, favorite);
-    }
-    await db.socialCommand('restore', chat);
+      for (const [key, favorite] of Object.entries(publicFavorites)) {
+        await db.addPublicFavorite(key, favorite);
+      }
+      await db.socialCommand('restore', chat);
 
-    return NextResponse.json({
-      message: '数据导入成功',
-      importedUsers: Object.keys(userData).length,
-      timestamp: importData.timestamp,
-      serverVersion: typeof importData.serverVersion === 'string' ? importData.serverVersion : '未知版本'
+      return NextResponse.json({
+        message: '数据导入成功',
+        importedUsers: Object.keys(userData).length,
+        timestamp: importData.timestamp,
+        serverVersion:
+          typeof importData.serverVersion === 'string'
+            ? importData.serverVersion
+            : '未知版本',
+      });
     });
-
   } catch (error) {
     console.error('数据导入失败:', error);
     return NextResponse.json(

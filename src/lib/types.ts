@@ -7,6 +7,7 @@ export interface PlayRecord {
   origin?: 'upload';
   media_session?: string;
   media_seq?: number;
+  media_revision?: string;
   title: string;
   source_name: string;
   cover: string;

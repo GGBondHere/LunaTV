@@ -55,7 +55,7 @@ export default function MediaUploader({
   };
   const run = async () => {
     if (running.current) return;
-    if (!file && session?.status !== 'processing') {
+    if (!file && session?.status !== 'processing' && !session?.retryable) {
       setError('请先选择视频；续传需要重新选择原文件');
       return;
     }
@@ -98,8 +98,17 @@ export default function MediaUploader({
       current();
       setSession(task);
       setBytes(task.offset);
-      if (task.status === 'failed')
+      if (task.status === 'failed' && !task.retryable)
         throw new Error(task.error || '该视频检查失败，请取消后重新上传');
+      if (task.status === 'cancelling')
+        throw new Error(task.error || '任务正在清理，可稍后重试取消');
+      if (task.status === 'failed' && task.retryable)
+        task = await mediaJSON<UploadView>(
+          `/api/media/uploads/${task.id}/complete`,
+          'POST',
+          undefined,
+          stop.signal
+        );
       if (task.status === 'uploading') {
         if (!file) throw new Error('请选择原视频文件');
         await verifyMediaFile(file, task, stop.signal, setStage);
@@ -176,7 +185,7 @@ export default function MediaUploader({
       }
       while (task.status === 'processing') {
         current();
-        setStage('正在检查视频和生成封面');
+        setStage(task.stage || '正在检查视频和生成封面');
         setSession(task);
         await new Promise((resolve) => setTimeout(resolve, 1000));
         current();
@@ -345,12 +354,17 @@ export default function MediaUploader({
           ) : (
             <button
               type='button'
-              disabled={session?.status === 'failed'}
+              disabled={
+                (session?.status === 'failed' && !session.retryable) ||
+                session?.status === 'cancelling'
+              }
               onClick={() => void run()}
               className='rounded-lg bg-green-600 px-4 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50'
             >
               {session?.status === 'processing'
                 ? '查看处理状态'
+                : session?.retryable
+                ? '重试发布'
                 : session
                 ? '继续上传'
                 : '开始上传'}

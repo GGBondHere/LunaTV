@@ -91,7 +91,11 @@ function MediaLibrary() {
     if (
       deleting.current.has(item.id) ||
       !window.confirm(
-        item.pendingDeletion
+        item.deletePath
+          ? `删除“${item.title}”？同时删除${
+              item.deleteLocation === 'local' ? '本地' : '云盘'
+            }原文件：${item.deletePath}`
+          : item.pendingDeletion
           ? '重试清理该视频的剩余文件？'
           : `删除“${item.title}”？所有人将无法继续观看，文件会从服务器移除。`
       )
@@ -141,6 +145,7 @@ function MediaLibrary() {
                 type='button'
                 disabled={
                   !data?.policy.enabled ||
+                  (data.policy.uploadAvailable === false && !data.upload) ||
                   (!data.policy.settings.allowUploads && !data.upload)
                 }
                 onClick={() => setUpload(true)}
@@ -164,9 +169,17 @@ function MediaLibrary() {
                   {data.policy.enabled ? (
                     <>
                       已用 {formatMediaBytes(data.policy.usedBytes)} /{' '}
-                      {data.policy.settings.quotaGiB} GiB · 上传预留{' '}
-                      {formatMediaBytes(data.policy.reservedBytes)} · 还可上传{' '}
-                      {formatMediaBytes(data.policy.availableBytes)}
+                      {data.policy.quotaBytes == null
+                        ? '未设站点额度'
+                        : formatMediaBytes(data.policy.quotaBytes)}{' '}
+                      · 上传预留 {formatMediaBytes(data.policy.reservedBytes)} ·
+                      还可上传{' '}
+                      {data.policy.availableBytesKnown === false
+                        ? '未知'
+                        : formatMediaBytes(
+                            data.policy.storageAvailableBytes ??
+                              data.policy.availableBytes
+                          )}
                       {!data.policy.settings.allowUploads && (
                         <p className='mt-1 text-amber-600'>
                           管理员已暂停上传，已发布视频仍可观看。
@@ -175,6 +188,11 @@ function MediaLibrary() {
                       {data.policy.overQuota && (
                         <p className='mt-1 text-amber-600'>
                           共享空间已超额，停止新增上传，不影响已有视频。
+                        </p>
+                      )}
+                      {data.policy.reason && (
+                        <p className='mt-1 text-amber-600'>
+                          {data.policy.reason}
                         </p>
                       )}
                     </>
