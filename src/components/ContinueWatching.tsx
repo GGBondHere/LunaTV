@@ -97,7 +97,10 @@ export default function ContinueWatching({ className }: ContinueWatchingProps) {
             return;
           media.current = new Map(
             (list?.items || [])
-              .filter((item) => !item.pendingDeletion && !item.unavailable)
+              .filter(
+                (item) =>
+                  !item.unavailable && !item.processing && !item.processingError
+              )
               .map((item) => [item.id, item])
           );
         }
@@ -157,7 +160,12 @@ export default function ContinueWatching({ className }: ContinueWatchingProps) {
               return;
             media.current = new Map(
               list.items
-                .filter((item) => !item.pendingDeletion && !item.unavailable)
+                .filter(
+                  (item) =>
+                    !item.unavailable &&
+                    !item.processing &&
+                    !item.processingError
+                )
                 .map((item) => [item.id, item])
             );
             updatePlayRecords(latestRecords);

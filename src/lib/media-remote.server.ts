@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'crypto';
 import { createReadStream } from 'fs';
+import { Readable } from 'stream';
 
 import {
   type CloudCapacity,
@@ -87,6 +88,7 @@ export async function dav(
     body?: Uint8Array;
     timeoutMs?: number;
     retry?: boolean;
+    uploadProgress?: (sentBytes: number, finished: boolean) => void;
   } = {}
 ): Promise<Response> {
   const original = new URL(objectURL(c, path));
@@ -98,9 +100,36 @@ export async function dav(
     options.signal?.addEventListener('abort', abort, { once: true });
     if (options.signal?.aborted) controller.abort();
     const timeoutMs =
-      options.timeoutMs ?? (options.file ? 30 * 60 * 1000 : 60000);
+      options.timeoutMs ?? (options.file ? 2 * 60 * 1000 : 60000);
     let timer = setTimeout(abort, timeoutMs);
-    const body = options.file ? createReadStream(options.file) : options.body;
+    const file = options.file
+      ? createReadStream(options.file, { highWaterMark: 256 * 1024 })
+      : undefined;
+    const body = file
+      ? Readable.from(
+          (async function* () {
+            let sent = 0;
+            try {
+              for await (const chunk of file) {
+                if (controller.signal.aborted)
+                  throw new DOMException('转存已停止', 'AbortError');
+                clearTimeout(timer);
+                timer = setTimeout(abort, timeoutMs);
+                sent += chunk.length;
+                options.uploadProgress?.(sent, false);
+                yield chunk;
+              }
+              if (!controller.signal.aborted) {
+                options.uploadProgress?.(sent, true);
+                clearTimeout(timer);
+                timer = setTimeout(abort, options.timeoutMs ?? 30 * 60 * 1000);
+              }
+            } finally {
+              file.destroy();
+            }
+          })()
+        )
+      : options.body;
     try {
       const headers: Record<string, string> = {
         'Accept-Encoding': 'identity',
@@ -227,6 +256,7 @@ export async function dav(
       );
     } finally {
       if (options.file && body && 'destroy' in body) body.destroy();
+      file?.destroy();
     }
   }
   throw new RemoteMediaError('REMOTE_REDIRECT', '远端重定向次数过多');
@@ -304,11 +334,13 @@ export async function davPut(
   path: string,
   file: string,
   size: number,
-  signal: AbortSignal
+  signal: AbortSignal,
+  progress?: (sentBytes: number, finished: boolean) => void
 ) {
   const r = await dav(c, path, 'PUT', {
     file,
     signal,
+    uploadProgress: progress,
     headers: { 'Content-Length': String(size), 'Content-Type': 'video/mp4' },
   });
   await r.body?.cancel();
@@ -1092,6 +1124,10 @@ export async function remoteStream(
       ? { Range: `bytes=${bounds.start}-${bounds.end}` }
       : {},
   });
+  if (!response.ok) {
+    await response.body?.cancel();
+    remoteFailure(response.status);
+  }
   const length = bounds.end - bounds.start + 1;
   const expectedRange = `bytes ${bounds.start}-${bounds.end}/${size}`;
   if (
@@ -1110,6 +1146,10 @@ export async function remoteStream(
     );
   }
   headers.set('Content-Length', String(length));
+  for (const name of ['etag', 'last-modified']) {
+    const value = response.headers.get(name);
+    if (value) headers.set(name, value);
+  }
   if (bounds.partial) headers.set('Content-Range', expectedRange);
   return new Response(head ? null : response.body, {
     status: bounds.partial ? 206 : 200,

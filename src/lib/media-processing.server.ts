@@ -8,7 +8,11 @@ export async function checkMediaTools() {
   await execute('ffmpeg', ['-version'], { timeout: 5000, maxBuffer: 65536 });
 }
 
-export async function inspectMedia(file: string, remote = false) {
+export async function inspectMedia(
+  file: string,
+  remote = false,
+  signal?: AbortSignal
+) {
   if (!remote) {
     const handle = await open(file, 'r');
     const header = Buffer.alloc(16);
@@ -22,7 +26,7 @@ export async function inspectMedia(file: string, remote = false) {
       header.toString('ascii', 8, 12) === 'qt  '
     ) {
       throw new Error(
-        '视频容器不支持，请转换为 MP4（H.264 视频、AAC 音频）后上传'
+        '视频容器不支持，请使用 MP4（H.264 或 H.265 视频、AAC 音频）'
       );
     }
   }
@@ -43,7 +47,7 @@ export async function inspectMedia(file: string, remote = false) {
       'json',
       file,
     ],
-    { timeout: remote ? 60000 : 20000, maxBuffer: 512 * 1024 }
+    { timeout: remote ? 60000 : 20000, maxBuffer: 512 * 1024, signal }
   );
   const info = JSON.parse(stdout) as {
     streams: {
@@ -61,8 +65,12 @@ export async function inspectMedia(file: string, remote = false) {
   const duration = Number(info.format.duration);
   if (
     videos.length !== 1 ||
-    video.codec_name !== 'h264' ||
-    !['yuv420p', 'yuvj420p'].includes(video.pix_fmt || '') ||
+    !(
+      (video.codec_name === 'h264' &&
+        ['yuv420p', 'yuvj420p'].includes(video.pix_fmt || '')) ||
+      (video.codec_name === 'hevc' &&
+        ['yuv420p', 'yuv420p10le'].includes(video.pix_fmt || ''))
+    ) ||
     audio.some((stream) => stream.codec_name !== 'aac') ||
     !Number.isFinite(duration) ||
     duration <= 0 ||
@@ -72,17 +80,23 @@ export async function inspectMedia(file: string, remote = false) {
     video.height > 8192
   ) {
     throw new Error(
-      '视频编码不支持，请使用 MP4、8 位 H.264 视频及 AAC 音频（也可无音轨）'
+      '视频编码不支持，请使用 MP4、8 位 H.264 或 8/10 位 H.265 视频及 AAC 音频（也可无音轨）'
     );
   }
-  return { duration, width: video.width, height: video.height };
+  return {
+    duration,
+    width: video.width,
+    height: video.height,
+    videoCodec: video.codec_name as 'h264' | 'hevc',
+  };
 }
 
 export async function createMediaCover(
   input: string,
   output: string,
   seconds?: number,
-  remote = false
+  remote = false,
+  signal?: AbortSignal
 ) {
   if (seconds === undefined) {
     const handle = await open(input, 'r');
@@ -156,6 +170,6 @@ export async function createMediaCover(
       '1',
       output,
     ],
-    { timeout: 30000, maxBuffer: 65536 }
+    { timeout: 30000, maxBuffer: 65536, signal }
   );
 }

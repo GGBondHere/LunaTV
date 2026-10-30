@@ -8,15 +8,15 @@ import {
   formatMediaBytes,
   MEDIA_CHUNK_BYTES,
   MEDIA_COVER_BYTES,
+  MEDIA_LEGACY_CHUNK_BYTES,
 } from '@/lib/media';
 import {
   assertMediaAccount,
   currentMediaAccount,
   mediaChanged,
-  MediaClientError,
   mediaJSON,
   mediaRequest,
-  uploadMediaPart,
+  uploadMediaFile,
   verifyMediaFile,
 } from '@/lib/media.client';
 
@@ -32,6 +32,8 @@ export default function MediaUploader({
   const [cover, setCover] = useState<File | null>(null);
   const [title, setTitle] = useState(initial?.title || '');
   const [busy, setBusy] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const cancelPending = useRef(false);
   const [error, setError] = useState(initial?.error || '');
   const [stage, setStage] = useState(
     initial?.status === 'processing' ? '正在检查视频和生成封面' : ''
@@ -54,7 +56,7 @@ export default function MediaUploader({
     mediaChanged();
   };
   const run = async () => {
-    if (running.current) return;
+    if (running.current || cancelPending.current) return;
     if (!file && session?.status !== 'processing' && !session?.retryable) {
       setError('请先选择视频；续传需要重新选择原文件');
       return;
@@ -91,6 +93,7 @@ export default function MediaUploader({
             size: file.size,
             modified: file.lastModified,
             title,
+            chunkBytes: MEDIA_CHUNK_BYTES,
           },
           stop.signal
         );
@@ -111,7 +114,15 @@ export default function MediaUploader({
         );
       if (task.status === 'uploading') {
         if (!file) throw new Error('请选择原视频文件');
-        await verifyMediaFile(file, task, stop.signal, setStage);
+        const hashes = await verifyMediaFile(
+          file,
+          task,
+          stop.signal,
+          (text) => {
+            current();
+            setStage(text);
+          }
+        );
         current();
         if (cover)
           await mediaRequest(`/api/media/uploads/${task.id}/cover`, {
@@ -120,87 +131,50 @@ export default function MediaUploader({
             body: cover,
             signal: stop.signal,
           });
-        let retries = 0;
-        while (task.offset < task.size) {
-          current();
-          setStage('正在上传');
-          const offset: number = task.offset;
-          const started = Date.now();
-          try {
-            task = await uploadMediaPart(
-              task,
-              file.slice(
-                offset,
-                Math.min(task.size, offset + MEDIA_CHUNK_BYTES)
-              ),
-              stop.signal,
-              (sent) => {
-                setBytes(offset + sent);
-                setSpeed((sent * 1000) / Math.max(1, Date.now() - started));
-              }
-            );
-            current();
-            retries = 0;
-            setSession(task);
-            setBytes(task.offset);
-          } catch (failure) {
-            current();
-            if (
-              !(failure instanceof MediaClientError) ||
-              (failure.status &&
-                ![409, 429, 500, 502, 503, 504].includes(failure.status)) ||
-              retries >= 3
-            )
-              throw failure;
-            retries++;
-            setStage(`连接恢复后重试（${retries}/3）`);
-            await new Promise<void>((resolve) => {
-              const timer = setTimeout(resolve, retries * 1000);
-              stop.signal.addEventListener(
-                'abort',
-                () => {
-                  clearTimeout(timer);
-                  resolve();
-                },
-                { once: true }
-              );
-            });
-            current();
-            task = await mediaRequest<UploadView>(
-              `/api/media/uploads/${task.id}`,
-              { signal: stop.signal }
-            );
-            await verifyMediaFile(file, task, stop.signal, setStage);
-            current();
-            setSession(task);
-            setBytes(task.offset);
-          }
+        task = await uploadMediaFile(
+          file,
+          task,
+          stop.signal,
+          {
+            session: setSession,
+            progress: (count, rate) => {
+              setBytes(count);
+              setSpeed(rate);
+            },
+            stage: setStage,
+          },
+          hashes
+        );
+        current();
+        if (task.status === 'uploading') {
+          setStage('正在确认上传');
+          task = await mediaJSON<UploadView>(
+            `/api/media/uploads/${task.id}/complete`,
+            'POST',
+            undefined,
+            stop.signal
+          );
         }
+      }
+      if (task.status === 'processing' && !task.accepted)
         task = await mediaJSON<UploadView>(
           `/api/media/uploads/${task.id}/complete`,
           'POST',
           undefined,
           stop.signal
         );
-      }
-      while (task.status === 'processing') {
-        current();
-        setStage(task.stage || '正在检查视频和生成封面');
-        setSession(task);
-        await new Promise((resolve) => setTimeout(resolve, 1000));
-        current();
-        task = await mediaRequest<UploadView>(`/api/media/uploads/${task.id}`, {
-          signal: stop.signal,
-        });
-      }
       current();
       setSession(task);
-      if (task.status !== 'ready')
+      if (task.status !== 'ready' && !task.accepted)
         throw new Error(task.error || '处理已暂停，请稍后继续');
       mediaChanged();
       onClose();
     } catch (failure) {
-      if (alive.current && account === currentMediaAccount()) {
+      if (
+        alive.current &&
+        account === currentMediaAccount() &&
+        !cancelPending.current
+      ) {
         setError(
           failure instanceof DOMException && failure.name === 'AbortError'
             ? '已暂停，重新点击可继续上传'
@@ -210,21 +184,60 @@ export default function MediaUploader({
       }
     } finally {
       running.current = false;
-      if (alive.current) setBusy(false);
+      if (alive.current && account === currentMediaAccount()) {
+        setBusy(false);
+        setSpeed(0);
+      }
     }
   };
   const cancel = async () => {
-    if (!session || !window.confirm('取消上传并删除已上传的临时文件？')) return;
+    if (
+      !session ||
+      cancelPending.current ||
+      !window.confirm('取消上传并删除已上传的临时文件？')
+    )
+      return;
+    const account = currentMediaAccount();
+    cancelPending.current = true;
+    setCancelling(true);
     controller.current?.abort();
     try {
       await mediaJSON(`/api/media/uploads/${session.id}`, 'DELETE');
+      if (!alive.current || account !== currentMediaAccount()) return;
       mediaChanged();
       onClose();
     } catch (failure) {
-      setError((failure as Error).message);
+      if (alive.current && account === currentMediaAccount())
+        setError((failure as Error).message);
+    } finally {
+      cancelPending.current = false;
+      if (alive.current && account === currentMediaAccount())
+        setCancelling(false);
     }
   };
-  const total = session?.size || file?.size || 0;
+  const transfer =
+    session?.status === 'processing' ? session.transfer : undefined;
+  const total = transfer?.totalBytes || session?.size || file?.size || 0;
+  const confirmedBytes = session
+    ? session.offset +
+      (session.received || []).reduce(
+        (sum, part) =>
+          sum +
+          Math.min(
+            session.chunkBytes || MEDIA_LEGACY_CHUNK_BYTES,
+            session.size - part.offset
+          ),
+        0
+      )
+    : 0;
+  const displayedBytes = Math.min(
+    total,
+    transfer ? transfer.sentBytes : busy ? bytes : confirmedBytes
+  );
+  const displayedSpeed = transfer ? transfer.speed : speed;
+  const displayedStage = transfer?.awaitingConfirmation
+    ? '数据已发送，等待存储服务确认'
+    : stage;
   return createPortal(
     <div
       className='fixed inset-0 z-[11000] flex items-center justify-center bg-black/50 p-4'
@@ -248,12 +261,13 @@ export default function MediaUploader({
           </button>
         </div>
         <p className='text-sm text-gray-500'>
-          支持 MP4、H.264 视频和 AAC 音频。上传中关闭面板会暂停，24
+          支持 MP4、H.264/H.265 视频和 AAC 音频。上传中关闭面板会暂停，24
           小时内可选择原文件续传；检查处理会在服务器继续。
         </p>
         {session && (
           <p className='break-all rounded-lg bg-gray-100 p-3 text-sm dark:bg-gray-800'>
-            未完成：{session.name} · {formatMediaBytes(session.offset)} /{' '}
+            {transfer ? '转存' : '上传'}：{session.name} ·{' '}
+            {formatMediaBytes(displayedBytes)} /{' '}
             {formatMediaBytes(session.size)}
           </p>
         )}
@@ -308,22 +322,31 @@ export default function MediaUploader({
               aria-label='视频上传进度'
               aria-valuemin={0}
               aria-valuemax={100}
-              aria-valuenow={total ? Math.floor((bytes / total) * 100) : 0}
+              aria-valuenow={
+                total ? Math.floor((displayedBytes / total) * 100) : 0
+              }
               className='h-2 overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700'
             >
               <div
                 className='h-full bg-green-500 transition-[width]'
                 style={{
-                  width: `${total ? Math.min(100, (bytes / total) * 100) : 0}%`,
+                  width: `${total ? (displayedBytes / total) * 100 : 0}%`,
                 }}
               />
             </div>
             <p className='min-h-5 text-gray-500'>
-              {stage || '上传已暂停'}
-              {stage === '正在上传' && speed > 0
-                ? ` · ${formatMediaBytes(speed)}/s · 剩余约 ${Math.ceil(
-                    Math.max(0, total - bytes) / speed
+              {displayedStage || '上传已暂停'}
+              {(transfer
+                ? !transfer.awaitingConfirmation
+                : stage === '正在上传') && displayedSpeed > 0
+                ? ` · ${formatMediaBytes(
+                    displayedSpeed
+                  )}/s · 剩余约 ${Math.ceil(
+                    Math.max(0, total - displayedBytes) / displayedSpeed
                   )} 秒`
+                : ''}
+              {transfer
+                ? ` · 已用 ${Math.floor(transfer.elapsedMs / 1000)} 秒`
                 : ''}
             </p>
           </div>
@@ -337,10 +360,11 @@ export default function MediaUploader({
           {session && (
             <button
               type='button'
+              disabled={cancelling}
               onClick={() => void cancel()}
               className='text-sm text-red-500'
             >
-              取消任务
+              {cancelling ? '正在取消' : '取消任务'}
             </button>
           )}
           {busy ? (
@@ -355,6 +379,7 @@ export default function MediaUploader({
             <button
               type='button'
               disabled={
+                cancelling ||
                 (session?.status === 'failed' && !session.retryable) ||
                 session?.status === 'cancelling'
               }

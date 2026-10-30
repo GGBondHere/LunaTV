@@ -1,5 +1,10 @@
 export const MEDIA_SOURCE = '__uploaded_media__';
-export const MEDIA_CHUNK_BYTES = 8 * 1024 * 1024;
+export const MEDIA_CHUNK_BYTES = 16 * 1024 * 1024;
+export const MEDIA_LEGACY_CHUNK_BYTES = 8 * 1024 * 1024;
+export const MEDIA_UPLOAD_CONCURRENCY = 2;
+export const MEDIA_UPLOAD_REQUESTS = 4;
+export const MEDIA_UPLOAD_CHECKPOINT_BYTES = 64 * 1024 * 1024;
+export const MEDIA_UPLOAD_WINDOW_BYTES = 128 * 1024 * 1024;
 export const MEDIA_COVER_BYTES = 5 * 1024 * 1024;
 export const MEDIA_SETTINGS_KEY = 'media:settings';
 export const GiB = 1024 ** 3;
@@ -98,6 +103,25 @@ export interface MediaAdminPolicy extends Omit<MediaPolicy, 'settings'> {
     title: string;
     path?: string;
     location?: 'local' | 'webdav';
+    error?: string;
+    running?: boolean;
+  }[];
+  pendingProcessing?: {
+    id: string;
+    title: string;
+    location: 'local' | 'webdav';
+    error?: string;
+    running: boolean;
+    retryable?: boolean;
+    sentBytes?: number;
+    totalBytes: number;
+  }[];
+  retainedSources?: {
+    id: string;
+    title: string;
+    path: string;
+    location: 'local' | 'webdav';
+    reason: string;
   }[];
   missingConnections: { id: string; references: number }[];
   scans: MediaScanStatus[];
@@ -266,11 +290,10 @@ export interface MediaView {
   contentRevision?: string;
   hasCover: boolean;
   canManage: boolean;
-  pendingDeletion?: boolean;
   unavailable?: boolean;
-  // Only returned to administrators for the deletion confirmation.
-  deletePath?: string;
-  deleteLocation?: 'local' | 'webdav';
+  processing?: boolean;
+  processingError?: string;
+  videoCodec?: 'h264' | 'hevc';
 }
 export interface UploadView {
   id: string;
@@ -280,11 +303,22 @@ export interface UploadView {
   title: string;
   offset: number;
   hashes: string[];
+  chunkBytes?: number;
+  checkpointOffset?: number;
+  received?: { offset: number; hash: string }[];
+  transfer?: {
+    sentBytes: number;
+    totalBytes: number;
+    elapsedMs: number;
+    speed: number;
+    awaitingConfirmation: boolean;
+  };
   hasCover: boolean;
   updatedAt: number;
   status: 'uploading' | 'processing' | 'ready' | 'failed' | 'cancelling';
   stage?: string;
   retryable?: boolean;
+  accepted?: boolean;
   error?: string;
 }
 export interface MediaPolicy {

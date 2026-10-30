@@ -431,13 +431,31 @@ export default function MediaSettingsPanel() {
         mediaChanged();
       }
       if (deletion) {
-        setNotice('该视频清理完成');
+        setNotice('已安排后台清理，可刷新查看结果');
         mediaChanged();
       }
     } catch (e) {
       if (account === currentMediaAccount()) setError((e as Error).message);
     } finally {
       if (kind === 'check') connectionCheck.current = null;
+      setBusy(false);
+    }
+  };
+  const retryProcessing = async (id: string) => {
+    if (busy) return;
+    const account = currentMediaAccount();
+    setBusy(true);
+    setError('');
+    try {
+      await mediaJSON(`/api/media/uploads/${id}/complete`, 'POST');
+      const value = await mediaRequest<MediaAdminPolicy>('/api/admin/media');
+      if (account !== currentMediaAccount()) return;
+      setPolicy(value);
+      setNotice('已安排后台处理');
+    } catch (failure) {
+      if (account === currentMediaAccount())
+        setError((failure as Error).message);
+    } finally {
       setBusy(false);
     }
   };
@@ -844,18 +862,62 @@ export default function MediaSettingsPanel() {
               </div>
             </details>
           )}
-          {!!policy?.pendingDeletes.length && (
+          {!!policy?.pendingProcessing?.length && (
+            <div className='space-y-3 border-t border-gray-200 pt-3 dark:border-gray-700'>
+              <h4 className='text-sm font-medium'>后台存储任务</h4>
+              {policy.pendingProcessing.map((task) => (
+                <div
+                  key={task.id}
+                  className='flex items-center justify-between gap-3 text-sm'
+                >
+                  <div className='min-w-0 break-all'>
+                    <p>
+                      {task.title} ·{' '}
+                      {task.location === 'webdav' ? 'WebDAV' : '本地'}
+                    </p>
+                    <p className={hintClass}>
+                      {task.error ||
+                        (task.running ? '正在后台处理' : '等待重试')}
+                      {task.sentBytes !== undefined
+                        ? ` · ${formatMediaBytes(
+                            task.sentBytes
+                          )} / ${formatMediaBytes(task.totalBytes)}`
+                        : ''}
+                    </p>
+                  </div>
+                  {!task.running && task.retryable !== false && (
+                    <button
+                      type='button'
+                      className={buttonClass}
+                      onClick={() => void retryProcessing(task.id)}
+                    >
+                      重试
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {policy && (
             <div className='space-y-3 border-t border-gray-200 pt-3 dark:border-gray-700'>
               <h4 className='text-sm font-medium'>待清理的视频</h4>
-              {policy.pendingDeletes.map((d) => (
+              {!policy.pendingDeletes?.length && (
+                <p className={hintClass}>暂无待清理视频</p>
+              )}
+              {policy.pendingDeletes?.map((d) => (
                 <div
                   key={d.id}
                   className='flex items-center justify-between gap-3 text-sm'
                 >
-                  <span className='min-w-0 break-all'>
-                    {d.title}
-                    {d.path ? ` · ${d.path}` : ''}
-                  </span>
+                  <div className='min-w-0 break-all'>
+                    <p>
+                      {d.title}
+                      {d.path ? ` · ${d.path}` : ''}
+                    </p>
+                    <p className={hintClass}>
+                      {d.error || (d.running ? '已安排后台清理' : '等待重试')}
+                    </p>
+                  </div>
                   <button
                     type='button'
                     className={buttonClass}
@@ -863,6 +925,30 @@ export default function MediaSettingsPanel() {
                   >
                     重试清理
                   </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {policy && (
+            <div className='space-y-3 border-t border-gray-200 pt-3 dark:border-gray-700'>
+              <h4 className='text-sm font-medium'>源文件保留记录</h4>
+              {policy.retainedSources?.length ? (
+                <p className={hintClass}>
+                  这些视频已从片库移除，以下源文件未确认删除，请核对。
+                </p>
+              ) : (
+                <p className={hintClass}>暂无保留记录</p>
+              )}
+              {policy.retainedSources?.map((item) => (
+                <div key={item.id} className='space-y-1 break-all text-sm'>
+                  <p>
+                    {item.title} ·{' '}
+                    {item.location === 'local' ? '本地' : 'WebDAV'}
+                  </p>
+                  <p className={hintClass}>{item.path}</p>
+                  <p className='text-xs text-amber-600 dark:text-amber-400'>
+                    {item.reason}
+                  </p>
                 </div>
               ))}
             </div>

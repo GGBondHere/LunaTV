@@ -115,12 +115,12 @@ export async function probeRemote(
     const url = `http://127.0.0.1:${address.port}/${token}`;
     let info: Awaited<ReturnType<typeof inspectMedia>>;
     try {
-      info = await inspectMedia(url, true);
+      info = await inspectMedia(url, true, stop.signal);
     } catch (e) {
       if (/^视频编码不支持/.test((e as Error).message || ''))
         throw new RemoteMediaError(
           'UNSUPPORTED_FORMAT',
-          '视频编码不支持，仅接受 8 位 H.264 及 AAC 或无音轨',
+          (e as Error).message,
           400
         );
       throw new RemoteMediaError(
@@ -131,7 +131,7 @@ export async function probeRemote(
     let hasCover = false;
     if (!stop.signal.aborted) {
       try {
-        await createMediaCover(url, cover, info.duration, true);
+        await createMediaCover(url, cover, info.duration, true, stop.signal);
         hasCover = true;
       } catch {
         /* Valid video can use the existing placeholder. */

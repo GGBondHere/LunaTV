@@ -30,9 +30,10 @@ export default function MediaCard({
 }) {
   const router = useRouter();
   const [menu, setMenu] = useState(false);
+  const playable =
+    !item.unavailable && !item.processing && !item.processingError;
   const play = () => {
-    if (!item.pendingDeletion && !item.unavailable)
-      router.push(`/media/${item.id}`);
+    if (playable) router.push(`/media/${item.id}`);
   };
   const longPress = useLongPress({
     onLongPress: () => setMenu(true),
@@ -40,7 +41,7 @@ export default function MediaCard({
     longPressDelay: 500,
   });
   const actions = [
-    ...(!item.pendingDeletion && !item.unavailable
+    ...(playable
       ? [
           {
             id: 'play',
@@ -59,7 +60,7 @@ export default function MediaCard({
           },
         ]
       : []),
-    ...(item.canManage && !item.pendingDeletion
+    ...(item.canManage
       ? [
           {
             id: 'edit',
@@ -73,7 +74,7 @@ export default function MediaCard({
       ? [
           {
             id: 'delete',
-            label: item.pendingDeletion ? '重试清理' : '删除视频',
+            label: '删除视频',
             icon: <Trash2 size={20} />,
             onClick: onDelete,
             color: 'danger' as const,
@@ -93,7 +94,8 @@ export default function MediaCard({
         <div
           role='button'
           tabIndex={0}
-          aria-label={`播放 ${item.title}`}
+          aria-label={`${item.processing ? '处理中' : '播放'} ${item.title}`}
+          aria-disabled={!playable}
           {...longPress}
           onClick={play}
           onKeyDown={(event) => {
@@ -102,9 +104,11 @@ export default function MediaCard({
               play();
             }
           }}
-          className='relative aspect-video cursor-pointer overflow-hidden rounded-xl bg-gray-200 shadow-sm transition-shadow hover:shadow-lg dark:bg-gray-800'
+          className={`relative aspect-video overflow-hidden rounded-xl bg-gray-200 shadow-sm transition-shadow dark:bg-gray-800 ${
+            playable ? 'cursor-pointer hover:shadow-lg' : 'cursor-default'
+          }`}
         >
-          {item.hasCover && !item.pendingDeletion ? (
+          {item.hasCover ? (
             <Image
               src={mediaCover(item)}
               alt={item.title}
@@ -119,13 +123,15 @@ export default function MediaCard({
             </div>
           )}
           <span className='absolute bottom-2 right-2 rounded bg-black/70 px-1.5 py-0.5 text-xs tabular-nums text-white'>
-            {item.pendingDeletion
-              ? '等待清理'
+            {item.processing
+              ? '处理中'
+              : item.processingError
+              ? '处理失败'
               : item.unavailable
-              ? '源文件暂不可用'
+              ? '暂不可播放'
               : mediaDuration(item.duration)}
           </span>
-          {progress > 0 && !item.pendingDeletion && (
+          {progress > 0 && (
             <div
               className='absolute bottom-0 left-0 h-1 bg-green-500'
               style={{ width: `${Math.min(100, progress)}%` }}
@@ -149,6 +155,9 @@ export default function MediaCard({
             <MoreHorizontal size={20} />
           </button>
         </div>
+        {item.processingError && (
+          <p className='mt-1 text-xs text-red-500'>{item.processingError}</p>
+        )}
       </article>
       <MobileActionSheet
         isOpen={menu}

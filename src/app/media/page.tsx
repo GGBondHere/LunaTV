@@ -87,31 +87,65 @@ function MediaLibrary() {
       window.removeEventListener('mediaUpdated', update);
     };
   }, [refresh]);
-  const remove = async (item: MediaView) => {
-    if (
-      deleting.current.has(item.id) ||
-      !window.confirm(
-        item.deletePath
-          ? `删除“${item.title}”？同时删除${
-              item.deleteLocation === 'local' ? '本地' : '云盘'
-            }原文件：${item.deletePath}`
-          : item.pendingDeletion
-          ? '重试清理该视频的剩余文件？'
-          : `删除“${item.title}”？所有人将无法继续观看，文件会从服务器移除。`
-      )
-    )
+  useEffect(() => {
+    if (!enabled || loading || !data?.items.some((item) => item.processing))
       return;
+    const stop = new AbortController();
+    const account = currentMediaAccount();
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      if (stop.signal.aborted || account !== currentMediaAccount()) return;
+      if (document.visibilityState === 'hidden') {
+        timer = setTimeout(poll, 3000);
+        return;
+      }
+      const generation = version.current;
+      try {
+        const value = await mediaRequest<{ items: MediaView[] }>(
+          `/api/media?items=1${mine ? '&mine=1' : ''}`,
+          { signal: stop.signal, timeoutMs: 15000 }
+        );
+        if (
+          stop.signal.aborted ||
+          generation !== version.current ||
+          account !== currentMediaAccount()
+        )
+          return;
+        setData((current) => current && { ...current, items: value.items });
+      } catch {
+        if (!stop.signal.aborted && account === currentMediaAccount())
+          timer = setTimeout(poll, 3000);
+      }
+    };
+    timer = setTimeout(poll, 1500);
+    return () => {
+      stop.abort();
+      clearTimeout(timer);
+    };
+  }, [data?.items, enabled, loading, mine]);
+  const remove = async (item: MediaView) => {
+    if (deleting.current.has(item.id)) return;
     deleting.current.add(item.id);
     const account = currentMediaAccount();
     try {
       await mediaJSON(`/api/media/${item.id}`, 'DELETE');
+      if (account !== currentMediaAccount()) return;
+      version.current++;
+      request.current?.abort();
+      setData(
+        (current) =>
+          current && {
+            ...current,
+            items: current.items.filter((video) => video.id !== item.id),
+          }
+      );
       syncMediaProgressCache(item.id, null, account);
       setActionError('');
-    } catch (failure) {
-      setActionError((failure as Error).message);
+    } catch {
+      if (account === currentMediaAccount()) setActionError('删除失败，请重试');
     } finally {
       deleting.current.delete(item.id);
-      mediaChanged();
+      if (account === currentMediaAccount()) mediaChanged();
     }
   };
   const items = (data?.items || []).filter((item) =>
@@ -286,7 +320,6 @@ function MediaLibrary() {
             initial={data?.upload || null}
             onClose={() => {
               setUpload(false);
-              void refresh();
             }}
           />
         )}
