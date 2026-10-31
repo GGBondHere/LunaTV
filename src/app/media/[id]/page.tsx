@@ -331,11 +331,47 @@ function MediaPlayer() {
     const hidden = () => {
       if (document.visibilityState === 'hidden') void save(true);
     };
+    let viewerSequence = 0;
+    let viewerOpen = false;
+    let viewerBusy = false;
+    let viewerHeartbeat: ReturnType<typeof setInterval> | undefined;
+    const viewer = (close = false) => {
+      if ((!close && (!current() || viewerBusy)) || !viewerOpen) return;
+      if (!close) viewerBusy = true;
+      // Sequence protects against a late heartbeat resurrecting a closed tab.
+      const body = JSON.stringify({ session, seq: ++viewerSequence, close });
+      const request = close
+        ? fetch(`/api/media/${id}/viewer`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body,
+            credentials: 'same-origin',
+            cache: 'no-store',
+            keepalive: true,
+          })
+        : mediaRequest(`/api/media/${id}/viewer`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body,
+            timeoutMs: 10000,
+            signal: controller.signal,
+          });
+      void request
+        .catch(() => undefined)
+        .finally(() => {
+          if (!close) viewerBusy = false;
+        });
+    };
     const pagehide = () => {
       void save(true);
+      viewer(true);
+    };
+    const pageshow = () => {
+      if (current()) viewer();
     };
     const focus = () => {
       if (account !== currentMediaAccount()) {
+        viewer(true);
         clearRecovery();
         controller.abort();
         art?.destroy(false);
@@ -366,6 +402,11 @@ function MediaPlayer() {
         videoCodec = metadata.videoCodec;
         metadataMs = performance.now() - openedAt;
         setItem(metadata);
+        viewerOpen = true;
+        viewer();
+        viewerHeartbeat = setInterval(() => {
+          viewer();
+        }, 25000);
         Artplayer.FULLSCREEN_WEB_IN_BODY = true;
         art = new Artplayer({
           container: container.current,
@@ -571,12 +612,15 @@ function MediaPlayer() {
     void load();
     document.addEventListener('visibilitychange', hidden);
     window.addEventListener('pagehide', pagehide);
+    window.addEventListener('pageshow', pageshow);
     window.addEventListener('focus', focus);
     window.addEventListener('online', online);
     window.addEventListener('offline', offline);
     return () => {
       // 导航前保留一次进度；请求不依赖即将销毁的播放器。
       void save(true);
+      viewer(true);
+      if (viewerHeartbeat) clearInterval(viewerHeartbeat);
       active = false;
       clearRecovery();
       controller.abort();
@@ -586,6 +630,7 @@ function MediaPlayer() {
       retryPlayback.current = () => undefined;
       document.removeEventListener('visibilitychange', hidden);
       window.removeEventListener('pagehide', pagehide);
+      window.removeEventListener('pageshow', pageshow);
       window.removeEventListener('focus', focus);
       window.removeEventListener('online', online);
       window.removeEventListener('offline', offline);

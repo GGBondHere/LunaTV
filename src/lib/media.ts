@@ -107,6 +107,7 @@ export interface MediaAdminPolicy extends Omit<MediaPolicy, 'settings'> {
     running?: boolean;
   }[];
   pendingProcessing?: {
+    status?: UploadView['status'];
     id: string;
     title: string;
     location: 'local' | 'webdav';

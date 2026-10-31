@@ -13,8 +13,8 @@ export const dynamic = 'force-dynamic';
 type Context = { params: { id: string } };
 export function GET(request: NextRequest, { params }: Context) {
   return mediaRoute(async () => {
-    await mediaAuth(request);
-    return serveMedia(params.id, request, true);
+    const auth = await mediaAuth(request);
+    return serveMedia(params.id, request, true, auth);
   });
 }
 export const HEAD = GET;

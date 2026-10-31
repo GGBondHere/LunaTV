@@ -44,6 +44,13 @@ import {
   parseMediaSettings,
 } from './media';
 import {
+  adoptMediaDisk,
+  initializeMediaCache,
+  mediaCacheAsset,
+  reclaimMediaCache,
+  touchMediaViewer,
+} from './media-cache.server';
+import {
   type LocalMediaRef,
   deleteLocalMedia,
   LocalMediaError,
@@ -330,7 +337,11 @@ async function ids(kind: 'items' | 'uploads') {
 async function treeSize(path: string): Promise<number> {
   let bytes = 0;
   for (const entry of await readdir(path, { withFileTypes: true })) {
-    if (entry.isSymbolicLink()) continue;
+    if (
+      entry.isSymbolicLink() ||
+      (path === controller.root && entry.name === '.playback-cache')
+    )
+      continue;
     const child = join(path, entry.name);
     try {
       bytes += entry.isDirectory()
@@ -357,6 +368,10 @@ async function initialize() {
       await access(controller.root, constants.R_OK | constants.W_OK);
       await mkdir(join(controller.root, 'items'), { recursive: true });
       await mkdir(join(controller.root, 'uploads'), { recursive: true });
+      await initializeMediaCache(controller.root, async () => ({
+        reserve: (await getMediaSettings()).minFreeGiB * GiB,
+        pending: await pendingUploadBytes(),
+      }));
       await checkMediaTools();
       const recover: Session[] = [];
       for (const id of await ids('uploads')) {
@@ -700,6 +715,7 @@ async function policy(): Promise<MediaPolicy> {
   allocated += Math.max(0, usedBytes - managedWritten);
   const reservedBytes = Math.max(0, allocated - usedBytes);
   const stagingReservedBytes = await pendingUploadBytes();
+  await reclaimMediaCache(settings.minFreeGiB * GiB + stagingReservedBytes);
   const disk = await statfs(controller.root, { bigint: true });
   const freeBytes = Number(disk.bavail * disk.bsize);
   const availableBytes = Math.max(
@@ -880,7 +896,10 @@ export async function mediaItems(
   return (await records())
     .filter(
       (item) =>
-        item.state === 'ready' && (!mine || item.owner === auth.username)
+        item.state === 'ready' &&
+        (!(item.processing || item.processingError) ||
+          item.owner === auth.username) &&
+        (!mine || item.owner === auth.username)
     )
     .sort((a, b) => b.createdAt - a.createdAt)
     .map((item) => view(item, auth));
@@ -932,7 +951,13 @@ async function record(id: string, allowUnavailable = false) {
   return item;
 }
 export async function getMedia(id: string, auth: MediaAuth) {
-  return view(await record(id), auth);
+  const item = await record(id, true);
+  visibleRecord(item, auth);
+  return view(item, auth);
+}
+function visibleRecord(item: RecordFile, auth: MediaAuth) {
+  if ((item.processing || item.processingError) && item.owner !== auth.username)
+    fail('NOT_FOUND', '视频尚未发布', 404);
 }
 function manage(owner: string, auth: MediaAuth) {
   if (owner !== auth.username && !auth.isAdmin)
@@ -1090,17 +1115,27 @@ export async function beginUpload(
         return uploadView(existing);
       fail('UPLOAD_CONFLICT', '已有未完成上传，请先继续或取消该任务', 409);
     }
-    if (current.uploadAvailable === false)
-      fail(
-        'UPLOAD_UNAVAILABLE',
-        current.reason || '当前上传位置额度或空间不足，已有视频仍可观看',
-        507
-      );
     if (size > current.settings.maxFileGiB * GiB)
       fail(
         'FILE_TOO_LARGE',
         `文件超过单个 ${current.settings.maxFileGiB} GiB 的限制`,
         413
+      );
+    // Optional playback cache yields to a new upload's full reservation.
+    if (size + COVER_RESERVE > current.availableBytes) {
+      await reclaimMediaCache(
+        settings.minFreeGiB * GiB +
+          (await pendingUploadBytes()) +
+          size +
+          COVER_RESERVE
+      );
+      Object.assign(current, await policy());
+    }
+    if (current.uploadAvailable === false)
+      fail(
+        'UPLOAD_UNAVAILABLE',
+        current.reason || '当前上传位置额度或空间不足，已有视频仍可观看',
+        507
       );
     if (size + COVER_RESERVE > current.availableBytes)
       fail(
@@ -1186,6 +1221,9 @@ async function checkWrite(bytes: number, enforceUploads = true) {
   if (enforceUploads && !settings.allowUploads)
     fail('UPLOAD_DISABLED', '管理员已暂停上传，断点已保留', 403);
   const remaining = await pendingUploadBytes();
+  await reclaimMediaCache(
+    settings.minFreeGiB * GiB + Math.max(bytes, remaining)
+  );
   const disk = await statfs(controller.root, { bigint: true });
   if (
     Number(disk.bavail * disk.bsize) - Math.max(bytes, remaining) <
@@ -1247,8 +1285,6 @@ export async function appendUpload(
       async () => {
         timing.queue = performance.now() - queuedAt;
         const session = await getSession(id, auth);
-        if (session.status !== 'uploading')
-          fail('UPLOAD_STATE', '该任务当前不能接收数据', 409);
         const chunkBytes = session.chunkBytes || MEDIA_LEGACY_CHUNK_BYTES;
         if (
           !request.headers.has('Upload-Offset') ||
@@ -1270,7 +1306,7 @@ export async function appendUpload(
           offset < session.offset
             ? session.hashes[offset / chunkBytes]
             : state.parts.get(offset);
-        if (priorHash) {
+        if (priorHash && session.status !== 'cancelling') {
           if (checksum === priorHash) return { view: uploadView(session) };
           fail(
             'CHUNK_CONFLICT',
@@ -1278,6 +1314,8 @@ export async function appendUpload(
             409
           );
         }
+        if (session.status !== 'uploading')
+          fail('UPLOAD_STATE', '该任务当前不能接收数据', 409);
         if (offset >= session.offset + MEDIA_UPLOAD_WINDOW_BYTES)
           fail('UPLOAD_WINDOW', '等待前面的分块接收完成，请稍后继续', 429);
         if (state.active.has(offset))
@@ -1427,6 +1465,8 @@ export async function appendUpload(
         );
       }
       state.session = committed;
+      if (committed.offset === committed.size)
+        return acceptUpload(id, auth, true);
       queueUploadCheckpoint(state);
       return uploadView(committed);
     });
@@ -1443,6 +1483,8 @@ export async function appendUpload(
         live.active.delete(offset);
         controller.active--;
         finish();
+        if (live.session.status === 'processing' && live.session.accepted)
+          queueMediaProcessing(id, auth);
       }
     }
   }
@@ -1775,7 +1817,18 @@ async function processUpload(id: string, auth: MediaAuth) {
         session.status = 'ready';
         session.updatedAt = Date.now();
         await saveSession(session);
-        if (session.storage) await rm(source, { force: true });
+        if (session.storage) {
+          const c = await connection(session.storage.connectionId);
+          const asset = mediaCacheAsset(
+            id,
+            item.contentRevision || item.revision,
+            [c.url, c.root, c.username, c.password],
+            session.storage.path,
+            item.bytes
+          );
+          if (!(await adoptMediaDisk(id, asset, source, item.bytes)))
+            await rm(source, { force: true });
+        }
       });
     });
     if (session.storage)
@@ -1945,86 +1998,79 @@ function queueMediaProcessing(id: string, auth: MediaAuth) {
     .catch(() => undefined);
   controller.processingJobs.set(id, settled);
 }
+async function acceptUpload(id: string, auth: MediaAuth, received = false) {
+  const session = await getSession(id, auth);
+  if (
+    session.status === 'ready' ||
+    (session.status === 'processing' && (session.accepted || session.playable))
+  )
+    return uploadView(session);
+  if (
+    (session.status !== 'uploading' &&
+      session.status !== 'processing' &&
+      !(session.status === 'failed' && session.retryable)) ||
+    session.offset !== session.size
+  )
+    fail('UPLOAD_INCOMPLETE', '视频尚未完整上传', 409);
+  if (!received && controller.uploads.get(id)?.active.size)
+    fail('CHUNK_BUSY', '正在确认最后的分块，请稍后重试', 409);
+  const previous = await json<RecordFile>(join(dir('items', id), 'media.json'));
+  if (previous?.state === 'deleting') fail('INTERRUPTED', '视频已被删除', 409);
+  const file = await stat(join(dir('uploads', id), 'video.part')).catch(
+    () => null
+  );
+  if ((!previous || previous.staged) && (!file || file.size !== session.size))
+    fail('UPLOAD_INCOMPLETE', '视频文件尚未完整接收，请重新打开上传面板', 409);
+  const processing: Session = {
+    ...session,
+    status: 'processing',
+    accepted: true,
+    error: undefined,
+    retryable: false,
+    stage: '正在检查视频',
+    updatedAt: Date.now(),
+  };
+  if (!processing.playable) {
+    const itemDir = dir('items', id);
+    await mkdir(itemDir, { recursive: true });
+    // This small durable record also restores a job whose final response was lost.
+    await atomicJSON(join(itemDir, 'media.json'), {
+      id,
+      title: session.title,
+      duration: 0,
+      width: 0,
+      height: 0,
+      bytes: session.size,
+      owner: session.owner,
+      createdAt: Date.now(),
+      revision: randomUUID(),
+      contentRevision: id,
+      hasCover: false,
+      customCover: session.customCover,
+      state: 'ready',
+      storage: session.storage,
+      ...previous,
+      processing: true,
+      processingError: undefined,
+      unavailable: false,
+      staged: {
+        hashes: [...session.hashes],
+        chunkBytes: session.chunkBytes || MEDIA_LEGACY_CHUNK_BYTES,
+      },
+    } satisfies RecordFile);
+  }
+  const live = controller.uploads.get(id) || {
+    session: processing,
+    durableOffset: session.offset,
+    parts: new Map<number, string>(),
+    active: new Map<number, UploadWrite>(),
+  };
+  live.session = processing;
+  controller.uploads.set(id, live);
+  return uploadView(processing);
+}
 export async function completeUpload(id: string, auth: MediaAuth) {
-  const result = await lock(id, async () => {
-    const session = await getSession(id, auth);
-    if (
-      session.status === 'ready' ||
-      (session.status === 'processing' &&
-        (session.accepted || session.playable))
-    )
-      return uploadView(session);
-    if (
-      (session.status !== 'uploading' &&
-        session.status !== 'processing' &&
-        !(session.status === 'failed' && session.retryable)) ||
-      session.offset !== session.size
-    )
-      fail('UPLOAD_INCOMPLETE', '视频尚未完整上传', 409);
-    if (controller.uploads.get(id)?.active.size)
-      fail('CHUNK_BUSY', '正在确认最后的分块，请稍后重试', 409);
-    const previous = await json<RecordFile>(
-      join(dir('items', id), 'media.json')
-    );
-    if (previous?.state === 'deleting')
-      fail('INTERRUPTED', '视频已被删除', 409);
-    const file = await stat(join(dir('uploads', id), 'video.part')).catch(
-      () => null
-    );
-    if ((!previous || previous.staged) && (!file || file.size !== session.size))
-      fail(
-        'UPLOAD_INCOMPLETE',
-        '视频文件尚未完整接收，请重新打开上传面板',
-        409
-      );
-    const processing: Session = {
-      ...session,
-      status: 'processing',
-      accepted: true,
-      error: undefined,
-      retryable: false,
-      stage: '正在检查视频',
-      updatedAt: Date.now(),
-    };
-    if (!processing.playable) {
-      const itemDir = dir('items', id);
-      await mkdir(itemDir, { recursive: true });
-      // This small durable record also restores a job whose final response was lost.
-      await atomicJSON(join(itemDir, 'media.json'), {
-        id,
-        title: session.title,
-        duration: 0,
-        width: 0,
-        height: 0,
-        bytes: session.size,
-        owner: session.owner,
-        createdAt: Date.now(),
-        revision: randomUUID(),
-        contentRevision: id,
-        hasCover: false,
-        customCover: session.customCover,
-        state: 'ready',
-        storage: session.storage,
-        ...previous,
-        processing: true,
-        processingError: undefined,
-        unavailable: false,
-        staged: {
-          hashes: [...session.hashes],
-          chunkBytes: session.chunkBytes || MEDIA_LEGACY_CHUNK_BYTES,
-        },
-      } satisfies RecordFile);
-    }
-    const live = controller.uploads.get(id) || {
-      session: processing,
-      durableOffset: session.offset,
-      parts: new Map<number, string>(),
-      active: new Map<number, UploadWrite>(),
-    };
-    live.session = processing;
-    controller.uploads.set(id, live);
-    return uploadView(processing);
-  });
+  const result = await lock(id, () => acceptUpload(id, auth));
   if (
     result.status === 'processing' ||
     controller.uploads.get(id)?.session.status === 'processing'
@@ -2626,10 +2672,35 @@ export async function saveMediaProgress(
     return progress;
   });
 }
+export async function mediaViewer(id: string, input: unknown, auth: MediaAuth) {
+  validId(id);
+  const data = input as { session?: unknown; seq?: unknown; close?: unknown };
+  if (
+    !data ||
+    typeof data.session !== 'string' ||
+    !/^[a-f0-9]{32}$/.test(data.session) ||
+    !Number.isSafeInteger(data.seq) ||
+    (data.seq as number) < 0 ||
+    typeof data.close !== 'boolean'
+  )
+    fail('INVALID_VIEWER', '播放会话无效', 400);
+  if (!data.close) {
+    const item = await record(id);
+    visibleRecord(item, auth);
+  }
+  touchMediaViewer(
+    id,
+    auth.username,
+    data.session,
+    data.seq as number,
+    data.close
+  );
+}
 export async function serveMedia(
   id: string,
   request: NextRequest,
-  cover: boolean
+  cover: boolean,
+  auth: MediaAuth
 ): Promise<Response> {
   const started = performance.now();
   const lease = createMediaStreamLease(validId(id), request.signal);
@@ -2637,6 +2708,7 @@ export async function serveMedia(
     measuredMediaResponse(response, lease, id, storage, started);
   try {
     const item = await record(id, cover);
+    visibleRecord(item, auth);
     if (!cover && item.storage && !item.staged)
       return respond(
         await cachedRemoteStream(
@@ -2670,7 +2742,7 @@ export async function serveMedia(
         const latest = await record(id, cover);
         if (!latest.staged) {
           lease.release();
-          return serveMedia(id, request, cover);
+          return serveMedia(id, request, cover, auth);
         }
         if (!item.storage) {
           handle = await open(join(dir('items', id), 'video.mp4'), 'r');
@@ -2987,20 +3059,16 @@ export async function mediaAdminPolicy(
         running: controller.deletionJobs.has(x.id),
       })),
     pendingProcessing: tasks
-      .filter(
-        (task) =>
-          (task.playable || task.accepted) &&
-          task.status !== 'ready' &&
-          task.status !== 'cancelling'
-      )
+      .filter((task) => task.status !== 'ready' && task.status !== 'cancelling')
       .map((task) => ({
         id: task.id,
         title: task.title,
         location: task.storage ? ('webdav' as const) : ('local' as const),
         error: task.error,
+        status: task.status,
         running: controller.processing.has(task.id),
-        retryable: task.retryable !== false || task.status === 'uploading',
-        sentBytes: controller.transfers.get(task.id)?.sent,
+        retryable: task.accepted && task.retryable !== false,
+        sentBytes: controller.transfers.get(task.id)?.sent ?? task.offset,
         totalBytes: task.size,
       })),
     retainedSources: (basic.enabled ? await ignoredSources() : []).map(
@@ -3458,7 +3526,10 @@ async function runLocalScan(
         }
         status.visited++;
         const path = directory.path.replace(/\/$/, '') + '/' + name;
-        if (['items', 'uploads'].includes(path.split('/')[1])) continue;
+        if (
+          ['items', 'uploads', '.playback-cache'].includes(path.split('/')[1])
+        )
+          continue;
         let temporary = '';
         let source: Awaited<ReturnType<typeof localObject>> = null;
         try {

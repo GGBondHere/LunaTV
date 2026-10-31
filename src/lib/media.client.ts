@@ -283,6 +283,7 @@ export async function uploadMediaFile(
       if (!received.has(offset)) pending.push(offset);
     let next = 0;
     let failure: unknown;
+    let accepted = false;
     let sentBytes = 0;
     let speed = 0;
     let sending = 0;
@@ -385,6 +386,16 @@ export async function uploadMediaFile(
       callbacks.session(task);
       notify();
       report();
+      if (
+        task.accepted &&
+        task.offset === task.size &&
+        ['processing', 'ready'].includes(task.status)
+      ) {
+        // The server confirmed every byte; slow/lost earlier acknowledgements no longer block closing.
+        accepted = true;
+        callbacks.progress(task.size, speed);
+        batch.abort();
+      }
     };
     const worker = async () => {
       try {
@@ -427,7 +438,7 @@ export async function uploadMediaFile(
           accept(value);
         }
       } catch (error) {
-        if (!failure) failure = error;
+        if (!accepted && !failure) failure = error;
         batch.abort();
       }
     };

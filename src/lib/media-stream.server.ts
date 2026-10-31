@@ -1,6 +1,17 @@
-import { createHash } from 'crypto';
-
 import { type MediaConnection } from './media';
+import {
+  invalidateMediaDisk,
+  mediaCacheAsset,
+  mediaDiskCapacity,
+  mediaDiskHas,
+  mediaHasViewers,
+  mediaMemoryBudget,
+  mediaReadAheadBytes,
+  onMediaCacheIdle,
+  readMediaDisk,
+  storeMediaDisk,
+  touchMediaCache,
+} from './media-cache.server';
 import {
   rangeBounds,
   RemoteMediaError,
@@ -8,7 +19,6 @@ import {
 } from './media-remote.server';
 
 const SEGMENT = 4 * 1024 * 1024;
-const MAX_BYTES = 64 * 1024 * 1024;
 const TTL = 2 * 60 * 1000;
 interface Segment {
   key: string;
@@ -30,6 +40,11 @@ interface StreamState {
   bytes: number;
   preloaders: number;
   timer?: ReturnType<typeof setInterval>;
+  etags?: Map<string, { id: string; value: string }>;
+  prefetch?: Map<
+    string,
+    { start: number; end: number; stop: AbortController; asset: string }
+  >;
 }
 const key = Symbol.for('lunatv.media.stream-cache.v2');
 const globalCache = globalThis as typeof globalThis & { [key]?: StreamState };
@@ -47,10 +62,13 @@ function drop(entry: Segment) {
   state.bytes -= entry.buffer.length;
 }
 function collect() {
+  const budget = mediaMemoryBudget();
   for (const entry of Array.from(state.entries.values()))
     if (
       !entry.owners.size &&
-      (entry.invalid || Date.now() - entry.touched > TTL)
+      (entry.invalid ||
+        Date.now() - entry.touched > TTL ||
+        state.bytes > budget)
     )
       drop(entry);
   if (!state.entries.size && state.timer) {
@@ -75,13 +93,15 @@ function allocate(
   if (state.entries.has(entryKey)) return undefined;
   collect();
   const bytes = end - start + 1;
+  const budget = mediaMemoryBudget();
+  const countLimit = Math.max(16, Math.ceil(budget / SEGMENT) + 16);
   for (const candidate of Array.from(state.entries.values())
     .filter((entry) => !entry.owners.size)
     .sort((a, b) => a.touched - b.touched)) {
-    if (state.bytes + bytes <= MAX_BYTES && state.entries.size < 128) break;
+    if (state.bytes + bytes <= budget && state.entries.size < countLimit) break;
     drop(candidate);
   }
-  if (state.bytes + bytes > MAX_BYTES || state.entries.size >= 128)
+  if (state.bytes + bytes > budget || state.entries.size >= countLimit)
     return undefined;
   const entry: Segment = {
     key: entryKey,
@@ -124,7 +144,21 @@ export function createMediaStreamLease(id: string, parent: AbortSignal) {
     },
   };
 }
+function clearMediaCache(id: string) {
+  const job = state.prefetch?.get(id);
+  job?.stop.abort();
+  for (const [asset, value] of Array.from(state.etags || []))
+    if (value.id === id) state.etags?.delete(asset);
+  for (const entry of Array.from(state.entries.values()))
+    if (entry.id === id) {
+      entry.invalid = true;
+      drop(entry);
+    }
+  collect();
+}
+onMediaCacheIdle(clearMediaCache);
 export function invalidateMediaStreams(id: string) {
+  invalidateMediaDisk(id);
   for (const stream of Array.from(state.streams.get(id) || [])) stream.abort();
   for (const entry of Array.from(state.entries.values()))
     if (entry.id === id) {
@@ -228,22 +262,14 @@ export async function cachedRemoteStream(
   head: boolean
 ) {
   const bounds = rangeBounds(head ? null : range, size);
-  if (head || !bounds || bounds.end - bounds.start < 64 * 1024)
-    return remoteStream(c, path, size, range, signal, head);
-  const asset = createHash('sha256')
-    .update(
-      JSON.stringify([
-        id,
-        revision,
-        c.url,
-        c.root,
-        c.username,
-        c.password,
-        path,
-        size,
-      ])
-    )
-    .digest('hex');
+  if (!bounds) return remoteStream(c, path, size, range, signal, head);
+  const asset = mediaCacheAsset(
+    id,
+    revision,
+    [c.url, c.root, c.username, c.password],
+    path,
+    size
+  );
   const owner = Symbol();
   const stop = new AbortController();
   let position = bounds.start;
@@ -304,22 +330,7 @@ export async function cachedRemoteStream(
     check();
     if (!reader) throw new RemoteMediaError('REMOTE_EMPTY', '没有收到视频内容');
     etag = response.headers.get('etag') || '';
-    if (etag && !etag.startsWith('W/'))
-      for (const entry of Array.from(state.entries.values()))
-        if (
-          entry.asset === asset &&
-          !entry.invalid &&
-          entry.etag &&
-          !entry.etag.startsWith('W/') &&
-          entry.etag !== etag
-        ) {
-          invalidateMediaStreams(id);
-          throw new RemoteMediaError(
-            'REMOTE_CHANGED',
-            '源视频已变化，请重新扫描后播放',
-            409
-          );
-        }
+    verifyETag(id, asset, etag);
   };
   const cacheBytes = (value: Uint8Array) => {
     let offset = 0;
@@ -339,6 +350,7 @@ export async function cachedRemoteStream(
         capture.written += count;
         if (capture.written === capture.buffer.length) {
           capture.complete = true;
+          storeMediaDisk(id, asset, capture.start, capture.buffer);
           release(capture, owner);
           capture = undefined;
         }
@@ -349,8 +361,22 @@ export async function cachedRemoteStream(
   try {
     check();
     cached = acquire();
-    const hit = !!cached;
-    if (!cached) await openSource();
+    const diskHit = mediaDiskHas(asset, position);
+    const hit = !!cached || diskHit;
+    if (!hit && (head || bounds.end - bounds.start < 64 * 1024)) {
+      cleanup();
+      return remoteStream(c, path, size, range, signal, head);
+    }
+    const previous = state.prefetch?.get(id);
+    if (
+      bounds.end - bounds.start >= 64 * 1024 &&
+      previous &&
+      (previous.asset !== asset ||
+        position < previous.start - SEGMENT ||
+        position > previous.end)
+    )
+      previous.stop.abort();
+    if (!cached && !diskHit) await openSource();
     check();
     // At most two responses read one segment ahead; others use normal backpressure.
     preloading = state.preloaders < 2;
@@ -369,6 +395,14 @@ export async function cachedRemoteStream(
         'Content-Range',
         `bytes ${bounds.start}-${bounds.end}/${size}`
       );
+    if (head) {
+      cleanup();
+      return new Response(null, { status: 200, headers });
+    }
+    const warm = () => {
+      if (bounds.end - bounds.start >= 64 * 1024)
+        scheduleReadAhead(id, asset, c, path, size, position);
+    };
     return new Response(
       new ReadableStream<Uint8Array>(
         {
@@ -380,23 +414,53 @@ export async function cachedRemoteStream(
                 out.close();
                 return;
               }
+              if (
+                reader &&
+                !capture &&
+                (mediaDiskHas(asset, position) ||
+                  Array.from(state.entries.values()).some(
+                    (e) =>
+                      e.asset === asset &&
+                      e.complete &&
+                      !e.invalid &&
+                      e.start <= position &&
+                      e.end >= position
+                  ))
+              ) {
+                const upstream = reader;
+                reader = undefined;
+                void upstream.cancel().catch(() => undefined);
+              }
               if (!reader) {
                 cached ||= acquire();
                 if (cached) {
-                  if (cached.invalid)
-                    throw new DOMException('缓存已失效', 'AbortError');
                   const offset = position - cached.start;
                   const count = Math.min(
                     64 * 1024,
                     cached.end - position + 1,
                     bounds.end - position + 1
                   );
+                  warm();
                   out.enqueue(cached.buffer.slice(offset, offset + count));
                   position += count;
                   if (position > cached.end || position > bounds.end) {
                     release(cached, owner);
                     cached = undefined;
                   }
+                  return;
+                }
+                const data = await readMediaDisk(
+                  asset,
+                  position,
+                  bounds.end,
+                  stop.signal
+                );
+                check();
+                if (data) {
+                  cacheBytes(data);
+                  warm();
+                  position += data.length;
+                  out.enqueue(data);
                   return;
                 }
                 await openSource();
@@ -411,6 +475,7 @@ export async function cachedRemoteStream(
               if (position + part.value.length > bounds.end + 1)
                 throw new RemoteMediaError('REMOTE_LENGTH', '视频长度不符');
               cacheBytes(part.value);
+              warm();
               position += part.value.length;
               out.enqueue(part.value);
             } catch (error) {
@@ -433,4 +498,132 @@ export async function cachedRemoteStream(
     cleanup();
     throw error;
   }
+}
+
+function scheduleReadAhead(
+  id: string,
+  asset: string,
+  c: MediaConnection,
+  path: string,
+  size: number,
+  position: number
+) {
+  const ahead = mediaReadAheadBytes();
+  if (ahead < SEGMENT * 2 || !mediaHasViewers(id)) return;
+  const jobs = state.prefetch || (state.prefetch = new Map());
+  const previous = jobs.get(id);
+  if (previous) return;
+  const maxJobs = mediaMemoryBudget() >= 128 * 1024 * 1024 ? 2 : 1;
+  if (jobs.size >= maxJobs) return;
+  // Leave a short lead to the demand stream. Cache consumers share this one fill.
+  const base = Math.floor(position / SEGMENT) * SEGMENT;
+  let start = base + 2 * SEGMENT;
+  const horizon = Math.min(size - 1, base + ahead - 1);
+  while (
+    start <= horizon &&
+    (mediaDiskHas(asset, start) ||
+      Array.from(state.entries.values()).some(
+        (e) =>
+          e.asset === asset &&
+          e.complete &&
+          !e.invalid &&
+          e.start <= start &&
+          e.end >= start
+      ))
+  )
+    start += SEGMENT;
+  if (start > horizon) return;
+  const end = horizon;
+  const job = { start, end, stop: new AbortController(), asset };
+  jobs.set(id, job);
+  const owner = Symbol();
+  let capture: Segment | undefined;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  const timeout = setTimeout(() => job.stop.abort(), 120000);
+  void (async () => {
+    try {
+      const disk = await mediaDiskCapacity();
+      if (job.stop.signal.aborted || !mediaHasViewers(id)) return;
+      job.end = Math.floor(
+        Math.min(
+          end,
+          base +
+            Math.max(SEGMENT, Math.min(ahead, disk + mediaMemoryBudget() / 2)) -
+            1
+        )
+      );
+      if (job.end < start) return;
+      const response = await remoteStream(
+        c,
+        path,
+        size,
+        `bytes=${start}-${job.end}`,
+        job.stop.signal
+      );
+      reader = response.body?.getReader();
+      const etag = response.headers.get('etag') || '';
+      verifyETag(id, asset, etag);
+      let at = start;
+      while (reader && !job.stop.signal.aborted && mediaHasViewers(id)) {
+        const part = await reader.read();
+        if (part.done) break;
+        if (job.stop.signal.aborted || at + part.value.length > job.end + 1)
+          break;
+        let offset = 0;
+        while (offset < part.value.length) {
+          const target = at + offset;
+          const segmentEnd = Math.min(
+            Math.floor(target / SEGMENT) * SEGMENT + SEGMENT - 1,
+            job.end
+          );
+          if (!capture && !mediaDiskHas(asset, target))
+            capture = allocate(id, asset, target, segmentEnd, owner, etag);
+          const count = Math.min(
+            part.value.length - offset,
+            segmentEnd - target + 1
+          );
+          if (capture) {
+            capture.buffer.set(
+              part.value.subarray(offset, offset + count),
+              capture.written
+            );
+            capture.written += count;
+            if (capture.written === capture.buffer.length) {
+              capture.complete = true;
+              storeMediaDisk(id, asset, capture.start, capture.buffer);
+              release(capture, owner);
+              capture = undefined;
+            }
+          }
+          offset += count;
+        }
+        at += part.value.length;
+        if (at > job.end) break;
+      }
+    } catch {
+      /* Prefetch failure leaves foreground streaming unchanged. */
+    } finally {
+      clearTimeout(timeout);
+      job.stop.abort();
+      await reader?.cancel().catch(() => undefined);
+      if (capture) release(capture, owner);
+      if (jobs.get(id) === job) jobs.delete(id);
+    }
+  })();
+}
+
+function verifyETag(id: string, asset: string, etag: string) {
+  if (!etag || etag.startsWith('W/')) return;
+  touchMediaCache(id);
+  const versions = state.etags || (state.etags = new Map());
+  const previous = versions.get(asset);
+  if (previous && previous.value !== etag) {
+    invalidateMediaStreams(id);
+    throw new RemoteMediaError(
+      'REMOTE_CHANGED',
+      '源视频已变化，请重新扫描后播放',
+      409
+    );
+  }
+  versions.set(asset, { id, value: etag });
 }

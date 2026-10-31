@@ -822,8 +822,8 @@ export default function MediaSettingsPanel() {
             </summary>
             <div className='mt-4 space-y-3'>
               <p className={hintClass}>
-                目录相对于本地媒体目录，/
-                表示整个目录，自动跳过 items、uploads 和链接文件。
+                目录相对于本地媒体目录，/ 表示整个目录，自动跳过 items、uploads
+                和链接文件。
               </p>
               <ScanEditor
                 config={localScan}
@@ -843,7 +843,8 @@ export default function MediaSettingsPanel() {
               </summary>
               <div className='mt-4 space-y-3'>
                 <p className={hintClass}>
-                  目录相对于 WebDAV 账号可见根目录，范围限于配置的存储目录，自动跳过
+                  目录相对于 WebDAV
+                  账号可见根目录，范围限于配置的存储目录，自动跳过
                   .lunatv-media。
                 </p>
                 {service && !service.canScan && (
@@ -877,7 +878,13 @@ export default function MediaSettingsPanel() {
                     </p>
                     <p className={hintClass}>
                       {task.error ||
-                        (task.running ? '正在后台处理' : '等待重试')}
+                        (task.running
+                          ? '正在后台处理'
+                          : task.status === 'uploading'
+                          ? '等待上传者继续上传'
+                          : task.status === 'processing'
+                          ? '等待后台处理'
+                          : '等待重试')}
                       {task.sentBytes !== undefined
                         ? ` · ${formatMediaBytes(
                             task.sentBytes

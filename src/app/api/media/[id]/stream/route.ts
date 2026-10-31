@@ -11,9 +11,9 @@ export async function GET(
   const started = performance.now();
   let authMs = 0;
   const response = await mediaRoute(async () => {
-    await mediaAuth(request);
+    const auth = await mediaAuth(request);
     authMs = performance.now() - started;
-    return serveMedia(params.id, request, false);
+    return serveMedia(params.id, request, false, auth);
   });
   response.headers.append(
     'Server-Timing',
